@@ -105,7 +105,8 @@ curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/
 Optional: install a specific version instead of the latest release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo env VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
+  sudo env VERSION=v0.1.0 sh
 ```
 
 Edit the runtime config:
@@ -148,7 +149,8 @@ Use a specific version instead of relying on the default `latest` resolution.
 Install or upgrade through `ghproxy.net`:
 
 ```sh
-curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo env GITHUB_PROXY=https://ghproxy.net VERSION=<release-tag> sh
+curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
+  sudo env GITHUB_PROXY=https://ghproxy.net VERSION=<release-tag> sh
 ```
 
 If the script is already downloaded locally:
@@ -175,5 +177,6 @@ curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/
 Keep the runtime config during uninstall:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/uninstall.sh | sudo env KEEP_CONFIG=1 sh
+curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/uninstall.sh | \
+  sudo env KEEP_CONFIG=1 sh
 ```
