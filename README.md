@@ -102,7 +102,7 @@ Install the latest Linux release:
 curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo sh
 ```
 
-Install a specific version:
+Optional: install a specific version instead of the latest release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo env VERSION=v0.1.0 sh
@@ -116,7 +116,7 @@ The installer creates this file with `0600` permissions if it does not already e
 sudo vi /etc/cert-renewer/config.yaml
 ```
 
-Validate the configuration with one forced update check before starting the service:
+Optional: validate the configuration with one forced update check before starting the service:
 
 ```sh
 sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -force
@@ -132,7 +132,14 @@ sudo systemctl enable --now cert-renewer
 sudo systemctl status cert-renewer
 ```
 
-Upgrade to the latest release:
+View service logs:
+
+```sh
+sudo journalctl -u cert-renewer -n 100 --no-pager
+sudo journalctl -u cert-renewer -f
+```
+
+## Upgrade
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo sh

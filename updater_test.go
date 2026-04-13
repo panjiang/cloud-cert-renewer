@@ -10,10 +10,16 @@ import (
 )
 
 func TestFormatSuccessNotification(t *testing.T) {
+	originalLocal := time.Local
+	time.Local = time.FixedZone("UTC+8", 8*60*60)
+	defer func() {
+		time.Local = originalLocal
+	}()
+
 	notAfter := time.Date(2026, 5, 1, 2, 3, 4, 0, time.UTC)
 
 	got := formatSuccessNotification("example.com", "cert-123", notAfter)
-	want := "**域名**: example.com\n**到期时间**: 2026-05-01T02:03:04Z\n**证书ID**: cert-123"
+	want := "**Domain**: example.com\n**Expires At**: 2026-05-01T10:03:04+08:00\n**Certificate ID**: cert-123"
 	if got != want {
 		t.Fatalf("formatSuccessNotification() = %q, want %q", got, want)
 	}
@@ -21,7 +27,7 @@ func TestFormatSuccessNotification(t *testing.T) {
 
 func TestFormatFailureNotification(t *testing.T) {
 	got := formatFailureNotification("example.com", "verify_external", errors.New("fingerprint mismatch"))
-	want := "**域名**: example.com\n**阶段**: verify_external\n**错误**: fingerprint mismatch"
+	want := "**Domain**: example.com\n**Stage**: verify_external\n**Error**: fingerprint mismatch"
 	if got != want {
 		t.Fatalf("formatFailureNotification() = %q, want %q", got, want)
 	}

@@ -383,12 +383,12 @@ func (u *Updater) verifyDeployedDomain(ctx context.Context, item deployedUpdate)
 }
 
 func formatSuccessNotification(domain, certificateID string, notAfter time.Time) string {
-	return fmt.Sprintf("**域名**: %s\n**到期时间**: %s\n**证书ID**: %s",
+	return fmt.Sprintf("**Domain**: %s\n**Expires At**: %s\n**Certificate ID**: %s",
 		domain,
-		notAfter.Format(time.RFC3339),
+		notAfter.In(time.Local).Format(time.RFC3339),
 		certificateID)
 }
 
 func formatFailureNotification(domain, stage string, err error) string {
-	return fmt.Sprintf("**域名**: %s\n**阶段**: %s\n**错误**: %v", domain, stage, err)
+	return fmt.Sprintf("**Domain**: %s\n**Stage**: %s\n**Error**: %v", domain, stage, err)
 }
