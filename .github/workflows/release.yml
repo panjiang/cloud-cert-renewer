@@ -29,6 +29,7 @@ jobs:
           set -euo pipefail
 
           binary="cert-renewer"
+          version="${GITHUB_REF_NAME}"
           mkdir -p dist build
 
           platforms=(
@@ -45,7 +46,9 @@ jobs:
             mkdir -p build
 
             CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-              go build -trimpath -ldflags "-s -w" -o "build/${binary}" .
+              go build -trimpath \
+                -ldflags "-s -w -X main.version=${version}" \
+                -o "build/${binary}" .
 
             tar -C build -czf "dist/${asset}" "${binary}"
           done

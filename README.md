@@ -14,7 +14,6 @@ For each configured domain, it:
 - verifies the external certificate after deployment
 
 Use `-force` to run one validation round for a fresh installation or troubleshooting.
-Use `-version` to print the build version and exit.
 
 ## Config
 
@@ -94,19 +93,6 @@ Use it for installation validation or troubleshooting.
 
 Do not add `-force` to the systemd service command.
 Do not run it in parallel with the running service instance.
-
-Print the program version:
-
-```sh
-go run . -version
-```
-
-Release binaries print the release tag.
-For local builds, inject a version string at build time if needed:
-
-```sh
-go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" .
-```
 
 ## Install
 
