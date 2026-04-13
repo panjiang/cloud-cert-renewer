@@ -2,7 +2,18 @@
 
 Update Tencent Cloud SSL certificates directly on the certificate host.
 
-The program runs on the machine that already serves the certificates. It checks the current public TLS certificate for each configured domain, downloads a newer Tencent Cloud certificate when the domain enters the `beforeExpired` window, replaces local certificate files atomically, runs domain-level `postCommands`, runs one round of `globalPostCommands` if every updated domain succeeded, and then verifies the external certificate. You can also run a one-off forced check with `-force` to validate a fresh installation.
+Run this program on the machine that already serves the certificates.
+
+For each configured domain, it:
+
+- checks the current public TLS certificate
+- downloads a newer Tencent Cloud certificate when the domain enters the `beforeExpired` window
+- replaces local certificate files atomically
+- runs domain-level `postCommands`
+- runs one round of `globalPostCommands` if every updated domain succeeded
+- verifies the external certificate after deployment
+
+Use `-force` to run one validation round for a fresh installation or troubleshooting.
 
 ## Config
 
@@ -56,9 +67,13 @@ domains:
       - consul kv put certs/doc.yourdomain.com.key @{{.KeyPath}}
 ```
 
-Durations use Go-style units plus day and week units: `ms`, `s`, `m`, `h`, `d`, and `w`. For example, `12h`, `10d`, and `1w`.
-Command entries are executed with `sh -lc`.
-Domain-level `postCommands` receive `{{.Domain}}`, `{{.CertPath}}`, `{{.KeyPath}}`, `{{.BackupCertPath}}`, and `{{.BackupKeyPath}}`. Top-level `globalPostCommands` do not receive domain-specific values.
+Config notes:
+
+- Durations use Go-style units plus day and week units: `ms`, `s`, `m`, `h`, `d`, and `w`.
+- Example durations: `12h`, `10d`, `1w`.
+- Command entries are executed with `sh -lc`.
+- Domain-level `postCommands` receive `{{.Domain}}`, `{{.CertPath}}`, `{{.KeyPath}}`, `{{.BackupCertPath}}`, and `{{.BackupKeyPath}}`.
+- Top-level `globalPostCommands` do not receive domain-specific values.
 
 ## Run
 
@@ -72,7 +87,12 @@ Run one forced update check round and exit:
 go run . -config=config.yaml -force
 ```
 
-`-force` skips the `beforeExpired` window, performs a forced update check, and exits after one round. Use it for installation validation or troubleshooting. This is a forced update path, so do not add `-force` to the systemd service command and do not run it in parallel with the running service instance.
+`-force` skips the `beforeExpired` window and exits after one round.
+
+Use it for installation validation or troubleshooting.
+
+Do not add `-force` to the systemd service command.
+Do not run it in parallel with the running service instance.
 
 ## Install
 
@@ -88,7 +108,9 @@ Install a specific version:
 curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo env VERSION=v0.1.0 sh
 ```
 
-Edit the runtime config. The installer creates this file with `0600` permissions if it does not already exist:
+Edit the runtime config:
+
+The installer creates this file with `0600` permissions if it does not already exist.
 
 ```sh
 sudo vi /etc/cert-renewer/config.yaml
@@ -100,7 +122,8 @@ Validate the configuration with one forced update check before starting the serv
 sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -force
 ```
 
-This command runs the forced update path. Make sure the `cert-renewer` service is not already running when you execute it.
+This command runs the forced update path.
+Make sure the `cert-renewer` service is not already running when you execute it.
 
 Start the service after the config is ready:
 
