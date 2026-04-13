@@ -43,22 +43,6 @@ github_url() {
 	printf '%s\n' "$url"
 }
 
-resolve_latest_version() {
-	api_url="https://api.github.com/repos/${REPO}/releases/latest"
-	response="$(curl -fsSL "$(github_url "$api_url")")" || {
-		echo "failed to resolve latest release from ${api_url}" >&2
-		exit 1
-	}
-
-	version="$(printf '%s\n' "$response" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-	if [ -z "$version" ]; then
-		echo "failed to parse latest release tag from ${api_url}" >&2
-		exit 1
-	fi
-
-	printf '%s\n' "$version"
-}
-
 detect_installed_version() {
 	if version_output="$("$1" -version 2>/dev/null)"; then
 		version_output="$(printf '%s' "$version_output" | tr -d '\r' | head -n 1)"
@@ -92,14 +76,17 @@ esac
 
 asset="${BINARY_NAME}_linux_${arch}.tar.gz"
 if [ "$VERSION" = "latest" ]; then
-	VERSION="$(resolve_latest_version)"
+	base_url="https://github.com/${REPO}/releases/latest/download"
+	display_version="latest"
+else
+	base_url="https://github.com/${REPO}/releases/download/${VERSION}"
+	display_version="$VERSION"
 fi
-base_url="https://github.com/${REPO}/releases/download/${VERSION}"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
-echo "Downloading ${asset} from ${REPO} ${VERSION}..."
+echo "Downloading ${asset} from ${REPO} ${display_version}..."
 curl -fsSL "$(github_url "${base_url}/${asset}")" -o "${tmp_dir}/${asset}"
 curl -fsSL "$(github_url "${base_url}/SHA256SUMS")" -o "${tmp_dir}/SHA256SUMS"
 
@@ -183,7 +170,7 @@ EOF
 
 systemctl daemon-reload
 
-installed_version="$VERSION"
+installed_version="$display_version"
 if detected_version="$(detect_installed_version "${INSTALL_DIR}/${BINARY_NAME}")"; then
 	installed_version="$detected_version"
 fi
