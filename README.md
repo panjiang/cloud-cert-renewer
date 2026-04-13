@@ -139,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/
 sudo systemctl restart cert-renewer
 ```
 
-Uninstall:
+## Uninstall
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/uninstall.sh | sudo sh
