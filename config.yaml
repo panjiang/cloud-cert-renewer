@@ -1,0 +1,39 @@
+alert:
+  beforeExpired: 10d
+  checkInterval: 12h
+  notifyUrl: https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+
+log:
+  level: info
+
+defaultProvider: tencentcloud
+
+providerConfigs:
+  tencentcloud:
+    secretId: xxx
+    secretKey: xxx
+    autoApply:
+      enabled: true
+      pollInterval: 1m
+      pollTimeout: 10m
+      deleteDnsAutoRecord: true
+
+globalPostCommands:
+  - nginx -t
+  - nginx -s reload
+
+domains:
+  - domain: doc.yourdomain.com
+    certPath: /etc/nginx/ssl/doc.yourdomain.com.crt
+    keyPath: /etc/nginx/ssl/doc.yourdomain.com.key
+    postCommands:
+      - consul kv put certs/doc.yourdomain.com.crt @{{.CertPath}}
+      - consul kv put certs/doc.yourdomain.com.key @{{.KeyPath}}
+
+  - domain: api.yourdomain.com
+    provider: tencentcloud
+    certPath: /etc/nginx/ssl/api.yourdomain.com.crt
+    keyPath: /etc/nginx/ssl/api.yourdomain.com.key
+    postCommands:
+      - consul kv put certs/api.yourdomain.com.crt @{{.CertPath}}
+      - consul kv put certs/api.yourdomain.com.key @{{.KeyPath}}
