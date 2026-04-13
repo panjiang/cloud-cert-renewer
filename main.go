@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,10 +12,12 @@ import (
 
 var configFilePath string
 var forceUpdate bool
+var showVersion bool
 
 func init() {
 	flag.StringVar(&configFilePath, "config", "config.yaml", "Config file path")
 	flag.BoolVar(&forceUpdate, "force", false, "Force one certificate check round and exit")
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 }
 
 func main() {
@@ -28,6 +31,11 @@ type updaterRunner interface {
 }
 
 func run() int {
+	if showVersion {
+		_, _ = fmt.Fprintln(os.Stdout, Version())
+		return 0
+	}
+
 	if err := initGlobalLogger("info"); err != nil {
 		_, _ = os.Stderr.WriteString("init logger: " + err.Error() + "\n")
 		return 1
