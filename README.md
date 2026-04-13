@@ -68,13 +68,13 @@ Command entries are executed with `sh -lc`. They can use Go template variables. 
 go run . -config=config.yaml
 ```
 
-Run one forced check round and exit:
+Run one forced update check round and exit:
 
 ```sh
 go run . -config=config.yaml -force
 ```
 
-`-force` skips the `beforeExpired` window and exits after one round. Use it for installation validation or troubleshooting. Do not add `-force` to the systemd service command.
+`-force` skips the `beforeExpired` window, performs a forced update check, and exits after one round. Use it for installation validation or troubleshooting. This is a forced update path, so do not add `-force` to the systemd service command and do not run it in parallel with the running service instance.
 
 ## Install
 
@@ -96,17 +96,19 @@ Edit the runtime config. The installer creates this file with `0600` permissions
 sudo vi /etc/cert-renewer/config.yaml
 ```
 
+Validate the configuration with one forced update check before starting the service:
+
+```sh
+sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -force
+```
+
+This command runs the forced update path. Make sure the `cert-renewer` service is not already running when you execute it.
+
 Start the service after the config is ready:
 
 ```sh
 sudo systemctl enable --now cert-renewer
 sudo systemctl status cert-renewer
-```
-
-Validate the configuration once before or after starting the service:
-
-```sh
-sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -force
 ```
 
 Upgrade to the latest release:
