@@ -27,7 +27,7 @@ Optional: install a specific version instead of the latest release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
-  sudo env VERSION=v0.1.0 sh
+  sudo env VERSION=<release-tag> sh
 ```
 
 ## Install (Optional: China Proxy)
