@@ -27,6 +27,11 @@ type ResolveOptions struct {
 	Force bool
 }
 
+type CleanupOptions struct {
+	Force          bool
+	ManagedDomains []string
+}
+
 type PendingCertificate struct {
 	CertificateID string
 	Status        uint64

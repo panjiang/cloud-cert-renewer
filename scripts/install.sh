@@ -123,6 +123,7 @@ providerConfigs:
   tencentcloud:
     secretId: xxx
     secretKey: xxx
+    autoDeleteOldCertificates: true
     autoApply:
       enabled: true
       pollInterval: 1m

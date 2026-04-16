@@ -10,8 +10,9 @@ For each configured domain, it:
 - downloads a newer Tencent Cloud certificate when the domain enters the `beforeExpired` window
 - replaces local certificate files atomically
 - runs domain-level `postCommands`
-- runs one round of `globalPostCommands` if every updated domain succeeded
-- verifies the external certificate after deployment
+- runs `globalPostCommands` for that updated domain
+- verifies the external certificate after `globalPostCommands`
+- optionally starts asynchronous cleanup of older Tencent Cloud certificates after verification succeeds
 
 Use `-force` to run one validation round for a fresh installation or troubleshooting.
 
@@ -39,6 +40,8 @@ providerConfigs:
     secretId: xxx
     # Required.
     secretKey: xxx
+    # Optional. Example enables it, but omitted means false at runtime.
+    autoDeleteOldCertificates: true
     autoApply:
       # Auto-apply a free DV certificate when no deployable certificate exists.
       # Wildcard domains are not auto-applied.
@@ -50,7 +53,7 @@ providerConfigs:
       # Delete the DNS_AUTO validation record after verification.
       deleteDnsAutoRecord: true
 
-# Optional. Run once after all updated domains succeed.
+# Optional. Run once for each successfully updated domain.
 globalPostCommands:
   - nginx -t
   - nginx -s reload
@@ -74,6 +77,8 @@ Config notes:
 - Command entries are executed with `sh -lc`.
 - Domain-level `postCommands` receive `{{.Domain}}`, `{{.CertPath}}`, `{{.KeyPath}}`, `{{.BackupCertPath}}`, and `{{.BackupKeyPath}}`.
 - Top-level `globalPostCommands` do not receive domain-specific values.
+- `providerConfigs.tencentcloud.autoDeleteOldCertificates` defaults to `false` when omitted.
+- Old certificate cleanup only runs after the new certificate is externally verified, and it skips any certificate that still appears to be live or shared with another managed domain.
 
 ## Run
 
@@ -88,6 +93,8 @@ go run . -config=config.yaml -force
 ```
 
 `-force` skips the `beforeExpired` window and exits after one round.
+
+When `autoDeleteOldCertificates` is enabled, `-force` also runs one cleanup pass after a domain verifies successfully.
 
 Use it for installation validation or troubleshooting.
 
@@ -136,7 +143,6 @@ sudo systemctl status cert-renewer
 View service logs:
 
 ```sh
-sudo journalctl -u cert-renewer -n 100 --no-pager
 sudo journalctl -u cert-renewer -f
 ```
 
@@ -152,14 +158,6 @@ Install or upgrade through `ghproxy.net`:
 curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
   sudo env GITHUB_PROXY=https://ghproxy.net VERSION=<release-tag> sh
 ```
-
-If the script is already downloaded locally:
-
-```sh
-sudo env GITHUB_PROXY=https://ghproxy.net VERSION=<release-tag> sh install.sh
-```
-
-`GITHUB_PROXY` is applied to the script's GitHub release asset downloads.
 
 ## Upgrade
 

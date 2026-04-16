@@ -45,9 +45,11 @@ type ProviderConfigs struct {
 }
 
 type TencentCloudConfig struct {
-	SecretID  string                 `yaml:"secretId"`
-	SecretKey string                 `yaml:"secretKey"`
-	AutoApply TencentAutoApplyConfig `yaml:"autoApply"`
+	SecretID                   string                 `yaml:"secretId"`
+	SecretKey                  string                 `yaml:"secretKey"`
+	AutoApply                  TencentAutoApplyConfig `yaml:"autoApply"`
+	AutoDeleteOldCertificates  *bool                  `yaml:"autoDeleteOldCertificates"`
+	AutoDeleteOldCertificatesV bool                   `yaml:"-"`
 }
 
 type TencentAutoApplyConfig struct {
@@ -154,6 +156,11 @@ func (c *Config) Complete() error {
 	}
 	if err := c.ProviderConfigs.TencentCloud.AutoApply.complete(); err != nil {
 		return fmt.Errorf("invalid providerConfigs.tencentcloud.autoApply: %w", err)
+	}
+	if c.ProviderConfigs.TencentCloud.AutoDeleteOldCertificates == nil {
+		c.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV = false
+	} else {
+		c.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV = *c.ProviderConfigs.TencentCloud.AutoDeleteOldCertificates
 	}
 
 	seenDomains := make(map[string]struct{}, len(c.Domains))

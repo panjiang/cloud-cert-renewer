@@ -53,6 +53,9 @@ func TestConfigComplete(t *testing.T) {
 		if !cfg.ProviderConfigs.TencentCloud.AutoApply.DeleteDNSAutoRecordV {
 			t.Fatal("AutoApply.DeleteDNSAutoRecordV = false, want true")
 		}
+		if cfg.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV {
+			t.Fatal("AutoDeleteOldCertificatesV = true, want false by default")
+		}
 		if len(cfg.GlobalPostCommands) != 1 || cfg.GlobalPostCommands[0] != "nginx -t" {
 			t.Fatalf("GlobalPostCommands = %#v, want %#v", cfg.GlobalPostCommands, []string{"nginx -t"})
 		}
@@ -306,6 +309,9 @@ func TestConfigComplete(t *testing.T) {
 		if cfg.ProviderConfigs.TencentCloud.AutoApply.DeleteDNSAutoRecordV {
 			t.Fatal("AutoApply.DeleteDNSAutoRecordV = true, want false")
 		}
+		if cfg.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV {
+			t.Fatal("AutoDeleteOldCertificatesV = true, want false")
+		}
 	})
 
 	t.Run("explicit auto apply disabled", func(t *testing.T) {
@@ -331,6 +337,30 @@ func TestConfigComplete(t *testing.T) {
 		}
 		if cfg.ProviderConfigs.TencentCloud.AutoApply.EnabledV {
 			t.Fatal("AutoApply.EnabledV = true, want false")
+		}
+	})
+
+	t.Run("explicit auto delete old certificates enabled", func(t *testing.T) {
+		cfg := Config{
+			Alert:           AlertConfig{BeforeExpiredStr: "14d"},
+			DefaultProvider: ProviderTencentCloud,
+			ProviderConfigs: ProviderConfigs{
+				TencentCloud: TencentCloudConfig{
+					SecretID:                  "id",
+					SecretKey:                 "key",
+					AutoDeleteOldCertificates: boolPtr(true),
+				},
+			},
+			Domains: []DomainConfig{
+				{Domain: "doc.yourdomain.com", CertPath: "/etc/nginx/ssl/doc.crt", KeyPath: "/etc/nginx/ssl/doc.key"},
+			},
+		}
+
+		if err := cfg.Complete(); err != nil {
+			t.Fatalf("Complete() error = %v", err)
+		}
+		if !cfg.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV {
+			t.Fatal("AutoDeleteOldCertificatesV = false, want true")
 		}
 	})
 
@@ -398,6 +428,9 @@ domains:
 		if !cfg.ProviderConfigs.TencentCloud.AutoApply.DeleteDNSAutoRecordV {
 			t.Fatal("AutoApply.DeleteDNSAutoRecordV = false, want true")
 		}
+		if cfg.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV {
+			t.Fatal("AutoDeleteOldCertificatesV = true, want false when omitted")
+		}
 	})
 
 	t.Run("loads globalPostCommands", func(t *testing.T) {
@@ -412,6 +445,7 @@ providerConfigs:
   tencentcloud:
     secretId: id
     secretKey: key
+    autoDeleteOldCertificates: true
     autoApply:
       enabled: true
       pollInterval: 2m
@@ -449,6 +483,9 @@ domains:
 		}
 		if cfg.ProviderConfigs.TencentCloud.AutoApply.DeleteDNSAutoRecordV {
 			t.Fatal("AutoApply.DeleteDNSAutoRecordV = true, want false")
+		}
+		if !cfg.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV {
+			t.Fatal("AutoDeleteOldCertificatesV = false, want true")
 		}
 		if len(cfg.GlobalPostCommands) != 1 || cfg.GlobalPostCommands[0] != "nginx -t" {
 			t.Fatalf("GlobalPostCommands = %#v, want %#v", cfg.GlobalPostCommands, []string{"nginx -t"})

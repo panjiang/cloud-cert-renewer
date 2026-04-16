@@ -10,8 +10,9 @@ import (
 
 func NewProviders(cfg *Config) (map[string]providerpkg.Provider, error) {
 	tencentProvider, err := tencentcloudprovider.New(tencentcloudprovider.Config{
-		SecretID:  cfg.ProviderConfigs.TencentCloud.SecretID,
-		SecretKey: cfg.ProviderConfigs.TencentCloud.SecretKey,
+		SecretID:                  cfg.ProviderConfigs.TencentCloud.SecretID,
+		SecretKey:                 cfg.ProviderConfigs.TencentCloud.SecretKey,
+		AutoDeleteOldCertificates: cfg.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV,
 		AutoApply: tencentcloudprovider.AutoApplyConfig{
 			Enabled:             cfg.ProviderConfigs.TencentCloud.AutoApply.EnabledV,
 			PollInterval:        cfg.ProviderConfigs.TencentCloud.AutoApply.PollInterval,
@@ -45,6 +46,21 @@ func toProviderObservedCertificate(cert *ObservedCertificate) *providerpkg.Obser
 		Domain:      cert.Domain,
 		Fingerprint: cert.Fingerprint,
 		NotAfter:    cert.NotAfter,
+	}
+}
+
+func toProviderCertificateMaterial(material *CertificateMaterial) *providerpkg.CertificateMaterial {
+	if material == nil {
+		return nil
+	}
+	return &providerpkg.CertificateMaterial{
+		CertificateID:  material.CertificateID,
+		Domain:         material.Domain,
+		CertificatePEM: material.CertificatePEM,
+		PrivateKeyPEM:  material.PrivateKeyPEM,
+		Fingerprint:    material.Fingerprint,
+		Serial:         material.Serial,
+		NotAfter:       material.NotAfter,
 	}
 }
 

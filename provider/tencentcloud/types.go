@@ -3,9 +3,10 @@ package tencentcloud
 import "time"
 
 type Config struct {
-	SecretID  string
-	SecretKey string
-	AutoApply AutoApplyConfig
+	SecretID                  string
+	SecretKey                 string
+	AutoApply                 AutoApplyConfig
+	AutoDeleteOldCertificates bool
 }
 
 type AutoApplyConfig struct {

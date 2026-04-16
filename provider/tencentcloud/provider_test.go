@@ -437,3 +437,226 @@ func TestProviderResolveCertificate(t *testing.T) {
 		}
 	})
 }
+
+func TestProviderCleanupOldCertificates(t *testing.T) {
+	keep := &providerpkg.CertificateMaterial{
+		CertificateID: "new-cert",
+		Fingerprint:   "new-fingerprint",
+		NotAfter:      time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+	live := &providerpkg.ObservedCertificate{
+		Domain:      "doc.yourdomain.com",
+		Fingerprint: "live-fingerprint",
+		NotAfter:    keep.NotAfter,
+	}
+
+	t.Run("deletes eligible old certificates", func(t *testing.T) {
+		var deleted []string
+		provider := &Provider{
+			cfg: Config{
+				AutoApply:                 AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+				AutoDeleteOldCertificates: true,
+			},
+			listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+				return []certificateRecord{
+					{
+						id:            "new-cert",
+						domains:       []string{domain},
+						notAfter:      keep.NotAfter,
+						allowDownload: true,
+					},
+					{
+						id:            "old-cert",
+						domains:       []string{domain},
+						notAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+				}, nil
+			},
+			downloadCertificateFunc: func(ctx context.Context, domain, certificateID string) (*providerpkg.CertificateMaterial, error) {
+				return &providerpkg.CertificateMaterial{
+					CertificateID: certificateID,
+					Fingerprint:   "old-fingerprint",
+					NotAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				}, nil
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				deleted = append(deleted, certificateIDs...)
+				return []string{"task-1"}, nil
+			},
+			describeDeleteTaskResultsFunc: func(ctx context.Context, taskIDs []string) ([]deleteTaskResult, error) {
+				return []deleteTaskResult{{
+					taskID:        "task-1",
+					certificateID: "old-cert",
+					status:        1,
+				}}, nil
+			},
+		}
+
+		err := provider.CleanupOldCertificates(context.Background(), live.Domain, keep, live, providerpkg.CleanupOptions{
+			ManagedDomains: []string{live.Domain},
+		})
+		if err != nil {
+			t.Fatalf("CleanupOldCertificates() error = %v", err)
+		}
+		if len(deleted) != 1 || deleted[0] != "old-cert" {
+			t.Fatalf("deleted = %#v, want %#v", deleted, []string{"old-cert"})
+		}
+	})
+
+	t.Run("skips shared certificates", func(t *testing.T) {
+		deleted := false
+		provider := &Provider{
+			cfg: Config{
+				AutoApply:                 AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+				AutoDeleteOldCertificates: true,
+			},
+			listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+				return []certificateRecord{
+					{
+						id:            "shared-old-cert",
+						domains:       []string{domain, "api.yourdomain.com"},
+						notAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+				}, nil
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				deleted = true
+				return nil, nil
+			},
+		}
+
+		err := provider.CleanupOldCertificates(context.Background(), live.Domain, keep, live, providerpkg.CleanupOptions{
+			ManagedDomains: []string{live.Domain, "api.yourdomain.com"},
+		})
+		if err != nil {
+			t.Fatalf("CleanupOldCertificates() error = %v", err)
+		}
+		if deleted {
+			t.Fatal("DeleteCertificates should not be called for shared certificates")
+		}
+	})
+
+	t.Run("skips certificate matching live fingerprint", func(t *testing.T) {
+		deleted := false
+		provider := &Provider{
+			cfg: Config{
+				AutoApply:                 AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+				AutoDeleteOldCertificates: true,
+			},
+			listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+				return []certificateRecord{
+					{
+						id:            "live-old-cert",
+						domains:       []string{domain},
+						notAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+				}, nil
+			},
+			downloadCertificateFunc: func(ctx context.Context, domain, certificateID string) (*providerpkg.CertificateMaterial, error) {
+				return &providerpkg.CertificateMaterial{
+					CertificateID: certificateID,
+					Fingerprint:   live.Fingerprint,
+					NotAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				}, nil
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				deleted = true
+				return nil, nil
+			},
+		}
+
+		err := provider.CleanupOldCertificates(context.Background(), live.Domain, keep, live, providerpkg.CleanupOptions{
+			ManagedDomains: []string{live.Domain},
+		})
+		if err != nil {
+			t.Fatalf("CleanupOldCertificates() error = %v", err)
+		}
+		if deleted {
+			t.Fatal("DeleteCertificates should not be called when candidate matches live fingerprint")
+		}
+	})
+
+	t.Run("skips certificate when fingerprint verification fails", func(t *testing.T) {
+		deleted := false
+		provider := &Provider{
+			cfg: Config{
+				AutoApply:                 AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+				AutoDeleteOldCertificates: true,
+			},
+			listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+				return []certificateRecord{
+					{
+						id:            "broken-old-cert",
+						domains:       []string{domain},
+						notAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+				}, nil
+			},
+			downloadCertificateFunc: func(ctx context.Context, domain, certificateID string) (*providerpkg.CertificateMaterial, error) {
+				return nil, errors.New("download failed")
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				deleted = true
+				return nil, nil
+			},
+		}
+
+		err := provider.CleanupOldCertificates(context.Background(), live.Domain, keep, live, providerpkg.CleanupOptions{
+			ManagedDomains: []string{live.Domain},
+		})
+		if err != nil {
+			t.Fatalf("CleanupOldCertificates() error = %v", err)
+		}
+		if deleted {
+			t.Fatal("DeleteCertificates should not be called when fingerprint verification fails")
+		}
+	})
+
+	t.Run("returns error when delete task fails", func(t *testing.T) {
+		provider := &Provider{
+			cfg: Config{
+				AutoApply:                 AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+				AutoDeleteOldCertificates: true,
+			},
+			listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+				return []certificateRecord{
+					{
+						id:            "old-cert",
+						domains:       []string{domain},
+						notAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+				}, nil
+			},
+			downloadCertificateFunc: func(ctx context.Context, domain, certificateID string) (*providerpkg.CertificateMaterial, error) {
+				return &providerpkg.CertificateMaterial{
+					CertificateID: certificateID,
+					Fingerprint:   "old-fingerprint",
+					NotAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				}, nil
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				return []string{"task-1"}, nil
+			},
+			describeDeleteTaskResultsFunc: func(ctx context.Context, taskIDs []string) ([]deleteTaskResult, error) {
+				return []deleteTaskResult{{
+					taskID:        "task-1",
+					certificateID: "old-cert",
+					status:        4,
+					err:           "resource still bound",
+				}}, nil
+			},
+		}
+
+		err := provider.CleanupOldCertificates(context.Background(), live.Domain, keep, live, providerpkg.CleanupOptions{
+			ManagedDomains: []string{live.Domain},
+		})
+		if err == nil {
+			t.Fatal("CleanupOldCertificates() expected error")
+		}
+	})
+}

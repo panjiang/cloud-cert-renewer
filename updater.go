@@ -20,19 +20,6 @@ type Updater struct {
 	ctx              context.Context
 }
 
-type successfulUpdate struct {
-	domain   DomainConfig
-	material *CertificateMaterial
-	result   *DeployResult
-	observed *ObservedCertificate
-}
-
-type deployedUpdate struct {
-	domain   DomainConfig
-	material *CertificateMaterial
-	result   *DeployResult
-}
-
 type CheckOptions struct {
 	Force bool
 }
@@ -94,8 +81,6 @@ func (u *Updater) RunOnce(options CheckOptions) CheckResult {
 }
 
 func (u *Updater) checkOnce(ctx context.Context, options CheckOptions) CheckResult {
-	var deployed []deployedUpdate
-	var failureCount int
 	result := CheckResult{Domains: len(u.cfg.Domains)}
 
 	zap.L().Info("certificate check round started",
@@ -103,103 +88,35 @@ func (u *Updater) checkOnce(ctx context.Context, options CheckOptions) CheckResu
 		zap.Bool("force", options.Force))
 
 	for _, domain := range u.cfg.Domains {
-		item, ok := u.handleDomain(ctx, domain, options)
+		updated, ok := u.handleDomain(ctx, domain, options)
 		if !ok {
-			failureCount++
+			result.Failures++
 			zap.L().Warn("stopping certificate check round because domain update failed",
 				zap.String("domain", domain.Domain),
 				zap.String("provider", domain.EffectiveProvider),
-				zap.Int("deployedUpdates", len(deployed)),
-				zap.Int("failures", failureCount))
-			break
-		}
-		if item != nil {
-			deployed = append(deployed, *item)
-		}
-	}
-
-	if len(deployed) == 0 {
-		result.Failures = failureCount
-		zap.L().Info("certificate check round finished",
-			zap.Int("domains", len(u.cfg.Domains)),
-			zap.Int("successfulUpdates", 0),
-			zap.Int("failures", failureCount),
-			zap.Bool("force", options.Force))
-		return result
-	}
-
-	if failureCount > 0 {
-		result.Failures = failureCount
-		zap.L().Warn("skipping global post commands because a domain update failed",
-			zap.Int("deployedUpdates", len(deployed)),
-			zap.Int("failures", failureCount))
-		zap.L().Info("certificate check round finished",
-			zap.Int("domains", len(u.cfg.Domains)),
-			zap.Int("successfulUpdates", 0),
-			zap.Int("failures", failureCount),
-			zap.Bool("force", options.Force))
-		return result
-	}
-
-	zap.L().Info("running global post commands", zap.Int("commands", len(u.cfg.GlobalPostCommands)))
-	globalPostCommands, err := u.deployer.RunGlobalCommands(ctx, u.cfg.GlobalPostCommands)
-	if err != nil {
-		for _, item := range deployed {
-			zap.L().Error("global post commands failed",
-				zap.Error(err),
-				zap.String("domain", item.domain.Domain),
-				zap.String("stage", "global_post_commands"),
-				zap.String("provider", item.domain.EffectiveProvider),
-				zap.String("certificateId", item.material.CertificateID),
-				zap.Bool("filesChanged", item.result.FilesChanged))
-			u.notifier.Failure("Certificate Update Failed",
-				formatFailureNotification(item.domain.Domain, "global_post_commands", err))
-		}
-		result.Failures = len(deployed)
-		zap.L().Info("certificate check round finished",
-			zap.Int("domains", len(u.cfg.Domains)),
-			zap.Int("successfulUpdates", 0),
-			zap.Int("failures", len(deployed)),
-			zap.Bool("force", options.Force))
-		return result
-	}
-	zap.L().Info("global post commands completed", zap.Int("commands", len(globalPostCommands)))
-
-	successful := make([]successfulUpdate, 0, len(deployed))
-	for _, item := range deployed {
-		observed, err := u.verifyDeployedDomain(ctx, item)
-		if err != nil {
-			result.SuccessfulUpdates = len(successful)
-			result.Failures = 1
+				zap.Int("successfulUpdates", result.SuccessfulUpdates),
+				zap.Int("failures", result.Failures))
 			zap.L().Info("certificate check round finished",
 				zap.Int("domains", len(u.cfg.Domains)),
-				zap.Int("successfulUpdates", len(successful)),
-				zap.Int("failures", 1),
+				zap.Int("successfulUpdates", result.SuccessfulUpdates),
+				zap.Int("failures", result.Failures),
 				zap.Bool("force", options.Force))
 			return result
 		}
-		successful = append(successful, successfulUpdate{
-			domain:   item.domain,
-			material: item.material,
-			result:   item.result,
-			observed: observed,
-		})
+		if updated {
+			result.SuccessfulUpdates++
+		}
 	}
 
-	for _, item := range successful {
-		u.notifier.Success("Certificate Updated",
-			formatSuccessNotification(item.domain.Domain, item.material.CertificateID, item.observed.NotAfter))
-	}
-	result.SuccessfulUpdates = len(successful)
 	zap.L().Info("certificate check round finished",
 		zap.Int("domains", len(u.cfg.Domains)),
-		zap.Int("successfulUpdates", len(successful)),
-		zap.Int("failures", 0),
+		zap.Int("successfulUpdates", result.SuccessfulUpdates),
+		zap.Int("failures", result.Failures),
 		zap.Bool("force", options.Force))
 	return result
 }
 
-func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options CheckOptions) (*deployedUpdate, bool) {
+func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options CheckOptions) (bool, bool) {
 	zap.L().Info("processing domain",
 		zap.String("domain", domain.Domain),
 		zap.String("provider", domain.EffectiveProvider),
@@ -214,7 +131,7 @@ func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options
 			zap.String("provider", domain.EffectiveProvider))
 		u.notifier.Failure("Certificate Update Failed",
 			formatFailureNotification(domain.Domain, "probe_current_certificate", err))
-		return nil, false
+		return false, false
 	}
 
 	remaining := time.Until(currentCert.NotAfter)
@@ -237,7 +154,7 @@ func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options
 			zap.String("provider", domain.EffectiveProvider),
 			zap.Duration("remaining", remaining),
 			zap.Duration("beforeExpired", u.cfg.Alert.BeforeExpired))
-		return nil, true
+		return false, true
 	}
 
 	if options.Force {
@@ -263,7 +180,7 @@ func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options
 			zap.String("provider", domain.EffectiveProvider))
 		u.notifier.Failure("Certificate Update Failed",
 			formatFailureNotification(domain.Domain, "resolve_provider", err))
-		return nil, false
+		return false, false
 	}
 
 	zap.L().Info("querying provider for certificate",
@@ -284,7 +201,7 @@ func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options
 			zap.String("provider", domain.EffectiveProvider))
 		u.notifier.Failure("Certificate Update Failed",
 			formatFailureNotification(domain.Domain, stage, err))
-		return nil, false
+		return false, false
 	}
 	if resolution == nil || (resolution.Material == nil && resolution.Pending == nil) {
 		message := "no newer provider certificate"
@@ -294,7 +211,7 @@ func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options
 		zap.L().Info(message,
 			zap.String("domain", domain.Domain),
 			zap.String("provider", domain.EffectiveProvider))
-		return nil, true
+		return false, true
 	}
 	if resolution.Pending != nil {
 		zap.L().Warn("certificate issuance is still pending",
@@ -305,7 +222,7 @@ func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options
 			zap.String("statusName", resolution.Pending.StatusName),
 			zap.String("statusMsg", resolution.Pending.StatusMsg),
 			zap.String("verifyType", resolution.Pending.VerifyType))
-		return nil, true
+		return false, true
 	}
 
 	nextCert := fromProviderCertificateMaterial(resolution.Material)
@@ -335,21 +252,59 @@ func (u *Updater) handleDomain(ctx context.Context, domain DomainConfig, options
 			zap.String("keyPath", domain.KeyPath))
 		u.notifier.Failure("Certificate Update Failed",
 			formatFailureNotification(domain.Domain, stage, err))
-		return nil, false
+		return false, false
 	}
 
-	return &deployedUpdate{
-		domain:   domain,
-		material: nextCert,
-		result:   result,
-	}, true
+	if err := u.runGlobalPostCommands(ctx, domain, nextCert, result); err != nil {
+		return false, false
+	}
+
+	observed, err := u.verifyDeployedDomain(ctx, domain, nextCert, result)
+	if err != nil {
+		return false, false
+	}
+
+	if u.cfg.ProviderConfigs.TencentCloud.AutoDeleteOldCertificatesV {
+		u.startCleanupTask(domain, provider, nextCert, observed, options)
+	}
+
+	u.notifier.Success("Certificate Updated",
+		formatSuccessNotification(domain.Domain, nextCert.CertificateID, observed.NotAfter))
+	return true, true
 }
 
-func (u *Updater) verifyDeployedDomain(ctx context.Context, item deployedUpdate) (*ObservedCertificate, error) {
-	domain := item.domain
-	nextCert := item.material
-	result := item.result
+func (u *Updater) runGlobalPostCommands(ctx context.Context, domain DomainConfig, nextCert *CertificateMaterial, result *DeployResult) error {
+	if len(u.cfg.GlobalPostCommands) == 0 {
+		return nil
+	}
 
+	zap.L().Info("running global post commands",
+		zap.String("domain", domain.Domain),
+		zap.String("provider", domain.EffectiveProvider),
+		zap.String("certificateId", nextCert.CertificateID),
+		zap.Int("commands", len(u.cfg.GlobalPostCommands)))
+	globalPostCommands, err := u.deployer.RunGlobalCommands(ctx, u.cfg.GlobalPostCommands)
+	if err != nil {
+		zap.L().Error("global post commands failed",
+			zap.Error(err),
+			zap.String("domain", domain.Domain),
+			zap.String("stage", "global_post_commands"),
+			zap.String("provider", domain.EffectiveProvider),
+			zap.String("certificateId", nextCert.CertificateID),
+			zap.Bool("filesChanged", result.FilesChanged))
+		u.notifier.Failure("Certificate Update Failed",
+			formatFailureNotification(domain.Domain, "global_post_commands", err))
+		return err
+	}
+	zap.L().Info("global post commands completed",
+		zap.String("domain", domain.Domain),
+		zap.String("provider", domain.EffectiveProvider),
+		zap.String("certificateId", nextCert.CertificateID),
+		zap.Int("commands", len(globalPostCommands)))
+	return nil
+}
+
+func (u *Updater) verifyDeployedDomain(ctx context.Context, domain DomainConfig, nextCert *CertificateMaterial, result *DeployResult) (*ObservedCertificate, error) {
 	zap.L().Info("verifying external deployment",
 		zap.String("domain", domain.Domain),
 		zap.String("provider", domain.EffectiveProvider),
@@ -380,6 +335,46 @@ func (u *Updater) verifyDeployedDomain(ctx context.Context, item deployedUpdate)
 		zap.Bool("filesChanged", result.FilesChanged))
 
 	return observed, nil
+}
+
+func (u *Updater) startCleanupTask(domain DomainConfig, provider providerpkg.Provider, keep *CertificateMaterial, observed *ObservedCertificate, options CheckOptions) {
+	ctx := u.ctx
+	managedDomains := u.managedDomains()
+
+	zap.L().Info("starting old certificate cleanup task",
+		zap.String("domain", domain.Domain),
+		zap.String("provider", domain.EffectiveProvider),
+		zap.String("certificateId", keep.CertificateID),
+		zap.Bool("force", options.Force),
+		zap.Int("managedDomains", len(managedDomains)))
+
+	go func() {
+		if err := provider.CleanupOldCertificates(ctx, domain.Domain, toProviderCertificateMaterial(keep), toProviderObservedCertificate(observed), providerpkg.CleanupOptions{
+			Force:          options.Force,
+			ManagedDomains: managedDomains,
+		}); err != nil {
+			zap.L().Warn("old certificate cleanup task failed",
+				zap.Error(err),
+				zap.String("domain", domain.Domain),
+				zap.String("provider", domain.EffectiveProvider),
+				zap.String("certificateId", keep.CertificateID),
+				zap.Bool("force", options.Force))
+			return
+		}
+		zap.L().Info("old certificate cleanup task finished",
+			zap.String("domain", domain.Domain),
+			zap.String("provider", domain.EffectiveProvider),
+			zap.String("certificateId", keep.CertificateID),
+			zap.Bool("force", options.Force))
+	}()
+}
+
+func (u *Updater) managedDomains() []string {
+	domains := make([]string, 0, len(u.cfg.Domains))
+	for _, item := range u.cfg.Domains {
+		domains = append(domains, item.Domain)
+	}
+	return domains
 }
 
 func formatSuccessNotification(domain, certificateID string, notAfter time.Time) string {
