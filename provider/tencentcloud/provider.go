@@ -136,6 +136,73 @@ func (c *Provider) CleanupOldCertificates(ctx context.Context, domain string, ke
 			zap.String("domain", domain))
 		return nil
 	}
+	return c.cleanupOldCertificates(ctx, domain, keep, live, options)
+}
+
+func (c *Provider) CleanupUnusedOldCertificates(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error {
+	if live == nil || strings.TrimSpace(live.Fingerprint) == "" {
+		zap.L().Warn("skipping unused old certificate cleanup because live certificate fingerprint is unavailable",
+			zap.String("provider", "tencentcloud"),
+			zap.String("domain", domain))
+		return nil
+	}
+
+	keep, err := c.findKeepCertificateForLiveCertificate(ctx, domain, live)
+	if err != nil {
+		return err
+	}
+	if keep == nil {
+		zap.L().Warn("skipping unused old certificate cleanup because no provider certificate matches the live certificate",
+			zap.String("provider", "tencentcloud"),
+			zap.String("domain", domain),
+			zap.String("fingerprint", live.Fingerprint))
+		return nil
+	}
+
+	return c.cleanupOldCertificates(ctx, domain, keep, live, options)
+}
+
+func (c *Provider) CleanupExpiredCertificates(ctx context.Context) error {
+	now := time.Now()
+	records, err := c.listCertificates(ctx, "", false)
+	if err != nil {
+		return err
+	}
+
+	expiredIDs := make([]string, 0, len(records))
+	for _, record := range records {
+		if record.id == "" || record.notAfter.IsZero() {
+			continue
+		}
+		if !record.notAfter.Before(now) {
+			continue
+		}
+		expiredIDs = append(expiredIDs, record.id)
+	}
+	if len(expiredIDs) == 0 {
+		zap.L().Info("no expired certificates eligible for cleanup",
+			zap.String("provider", "tencentcloud"))
+		return nil
+	}
+
+	zap.L().Info("deleting expired certificates",
+		zap.String("provider", "tencentcloud"),
+		zap.Int("certificates", len(expiredIDs)))
+	taskIDs, err := c.deleteCertificates(ctx, expiredIDs)
+	if err != nil {
+		return err
+	}
+	if len(taskIDs) == 0 {
+		zap.L().Info("deleted expired certificates without async tasks",
+			zap.String("provider", "tencentcloud"),
+			zap.Int("certificates", len(expiredIDs)))
+		return nil
+	}
+
+	return c.waitDeleteTasks(ctx, "expired_cleanup", "", taskIDs)
+}
+
+func (c *Provider) cleanupOldCertificates(ctx context.Context, domain string, keep *providerpkg.CertificateMaterial, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error {
 	if keep == nil || strings.TrimSpace(keep.CertificateID) == "" {
 		return fmt.Errorf("missing keep certificate for cleanup")
 	}
@@ -408,6 +475,37 @@ func (c *Provider) findCleanupCandidates(ctx context.Context, domain string, kee
 	return candidates, nil
 }
 
+func (c *Provider) findKeepCertificateForLiveCertificate(ctx context.Context, domain string, live *providerpkg.ObservedCertificate) (*providerpkg.CertificateMaterial, error) {
+	records, err := c.listCertificates(ctx, domain, false)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, record := range records {
+		if record.id == "" || !record.allowDownload {
+			continue
+		}
+
+		material, err := c.downloadCertificate(ctx, domain, record.id)
+		if err != nil {
+			zap.L().Warn("skipping keep-certificate candidate because fingerprint verification failed",
+				zap.Error(err),
+				zap.String("provider", "tencentcloud"),
+				zap.String("domain", domain),
+				zap.String("certificateId", record.id))
+			continue
+		}
+		if material == nil || strings.TrimSpace(material.Fingerprint) == "" {
+			continue
+		}
+		if material.Fingerprint == live.Fingerprint {
+			return material, nil
+		}
+	}
+
+	return nil, nil
+}
+
 func (c *Provider) recordCoversOtherManagedDomains(record certificateRecord, currentDomain string, managedDomains []string) bool {
 	for _, managedDomain := range managedDomains {
 		if strings.EqualFold(strings.TrimSpace(managedDomain), strings.TrimSpace(currentDomain)) {
@@ -431,6 +529,7 @@ func (c *Provider) listCertificateRecords(ctx context.Context, domain string, de
 	var records []certificateRecord
 	var offset uint64
 	const limit uint64 = 100
+	domain = strings.TrimSpace(domain)
 
 	zap.L().Info("listing provider certificates",
 		zap.String("provider", "tencentcloud"),
@@ -441,7 +540,9 @@ func (c *Provider) listCertificateRecords(ctx context.Context, domain string, de
 		req := sslapi.NewDescribeCertificatesRequest()
 		req.Offset = sslcommon.Uint64Ptr(offset)
 		req.Limit = sslcommon.Uint64Ptr(limit)
-		req.SearchKey = sslcommon.StringPtr(domain)
+		if domain != "" {
+			req.SearchKey = sslcommon.StringPtr(domain)
+		}
 		req.CertificateType = sslcommon.StringPtr("SVR")
 		req.ExpirationSort = sslcommon.StringPtr("DESC")
 		if deployableOnly {
@@ -466,6 +567,10 @@ func (c *Provider) listCertificateRecords(ctx context.Context, domain string, de
 				return nil, err
 			}
 			if !ok {
+				continue
+			}
+			if domain == "" {
+				records = append(records, record)
 				continue
 			}
 			if deployableOnly {
@@ -658,40 +763,42 @@ func (c *Provider) deleteCertificates(ctx context.Context, certificateIDs []stri
 		return c.deleteCertificatesFunc(ctx, certificateIDs)
 	}
 
-	req := sslapi.NewDeleteCertificatesRequest()
-	req.IsSync = sslcommon.BoolPtr(true)
-	req.CertificateIds = make([]*string, 0, len(certificateIDs))
-	for _, certificateID := range certificateIDs {
-		req.CertificateIds = append(req.CertificateIds, sslcommon.StringPtr(certificateID))
-	}
+	var taskIDs []string
+	for _, batch := range splitStringBatches(certificateIDs, 100) {
+		req := sslapi.NewDeleteCertificatesRequest()
+		req.IsSync = sslcommon.BoolPtr(true)
+		req.CertificateIds = make([]*string, 0, len(batch))
+		for _, certificateID := range batch {
+			req.CertificateIds = append(req.CertificateIds, sslcommon.StringPtr(certificateID))
+		}
 
-	resp, err := c.client.DeleteCertificatesWithContext(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("delete certificates: %w", err)
-	}
-	if resp.Response == nil {
-		return nil, fmt.Errorf("delete certificates: empty response")
-	}
+		resp, err := c.client.DeleteCertificatesWithContext(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("delete certificates: %w", err)
+		}
+		if resp.Response == nil {
+			return nil, fmt.Errorf("delete certificates: empty response")
+		}
 
-	if len(resp.Response.Fail) > 0 {
-		failures := make([]string, 0, len(resp.Response.Fail))
-		for _, item := range resp.Response.Fail {
-			if item == nil {
+		if len(resp.Response.Fail) > 0 {
+			failures := make([]string, 0, len(resp.Response.Fail))
+			for _, item := range resp.Response.Fail {
+				if item == nil {
+					continue
+				}
+				failures = append(failures, fmt.Sprintf("%s:%s", stringValue(item.CertId), stringValue(item.Msg)))
+			}
+			if len(failures) > 0 {
+				return nil, fmt.Errorf("delete certificates failed: %s", strings.Join(failures, ", "))
+			}
+		}
+
+		for _, item := range resp.Response.CertTaskIds {
+			if item == nil || item.TaskId == nil || strings.TrimSpace(*item.TaskId) == "" {
 				continue
 			}
-			failures = append(failures, fmt.Sprintf("%s:%s", stringValue(item.CertId), stringValue(item.Msg)))
+			taskIDs = append(taskIDs, strings.TrimSpace(*item.TaskId))
 		}
-		if len(failures) > 0 {
-			return nil, fmt.Errorf("delete certificates failed: %s", strings.Join(failures, ", "))
-		}
-	}
-
-	taskIDs := make([]string, 0, len(resp.Response.CertTaskIds))
-	for _, item := range resp.Response.CertTaskIds {
-		if item == nil || item.TaskId == nil || strings.TrimSpace(*item.TaskId) == "" {
-			continue
-		}
-		taskIDs = append(taskIDs, strings.TrimSpace(*item.TaskId))
 	}
 	return taskIDs, nil
 }
@@ -701,31 +808,33 @@ func (c *Provider) describeDeleteTaskResults(ctx context.Context, taskIDs []stri
 		return c.describeDeleteTaskResultsFunc(ctx, taskIDs)
 	}
 
-	req := sslapi.NewDescribeDeleteCertificatesTaskResultRequest()
-	req.TaskIds = make([]*string, 0, len(taskIDs))
-	for _, taskID := range taskIDs {
-		req.TaskIds = append(req.TaskIds, sslcommon.StringPtr(taskID))
-	}
-
-	resp, err := c.client.DescribeDeleteCertificatesTaskResultWithContext(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("describe delete certificate tasks: %w", err)
-	}
-	if resp.Response == nil {
-		return nil, fmt.Errorf("describe delete certificate tasks: empty response")
-	}
-
-	results := make([]deleteTaskResult, 0, len(resp.Response.DeleteTaskResult))
-	for _, item := range resp.Response.DeleteTaskResult {
-		if item == nil {
-			continue
+	var results []deleteTaskResult
+	for _, batch := range splitStringBatches(taskIDs, 100) {
+		req := sslapi.NewDescribeDeleteCertificatesTaskResultRequest()
+		req.TaskIds = make([]*string, 0, len(batch))
+		for _, taskID := range batch {
+			req.TaskIds = append(req.TaskIds, sslcommon.StringPtr(taskID))
 		}
-		results = append(results, deleteTaskResult{
-			taskID:        stringValue(item.TaskId),
-			certificateID: stringValue(item.CertId),
-			status:        uint64Value(item.Status),
-			err:           stringValue(item.Error),
-		})
+
+		resp, err := c.client.DescribeDeleteCertificatesTaskResultWithContext(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("describe delete certificate tasks: %w", err)
+		}
+		if resp.Response == nil {
+			return nil, fmt.Errorf("describe delete certificate tasks: empty response")
+		}
+
+		for _, item := range resp.Response.DeleteTaskResult {
+			if item == nil {
+				continue
+			}
+			results = append(results, deleteTaskResult{
+				taskID:        stringValue(item.TaskId),
+				certificateID: stringValue(item.CertId),
+				status:        uint64Value(item.Status),
+				err:           stringValue(item.Error),
+			})
+		}
 	}
 	return results, nil
 }
@@ -869,4 +978,23 @@ func uint64Value(value *uint64) uint64 {
 
 func boolValue(value *bool) bool {
 	return value != nil && *value
+}
+
+func splitStringBatches(values []string, size int) [][]string {
+	if len(values) == 0 {
+		return nil
+	}
+	if size <= 0 || len(values) <= size {
+		return [][]string{values}
+	}
+
+	batches := make([][]string, 0, (len(values)+size-1)/size)
+	for start := 0; start < len(values); start += size {
+		end := start + size
+		if end > len(values) {
+			end = len(values)
+		}
+		batches = append(batches, values[start:end])
+	}
+	return batches
 }

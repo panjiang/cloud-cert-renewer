@@ -660,3 +660,140 @@ func TestProviderCleanupOldCertificates(t *testing.T) {
 		}
 	})
 }
+
+func TestProviderCleanupUnusedOldCertificates(t *testing.T) {
+	live := &providerpkg.ObservedCertificate{
+		Domain:      "doc.yourdomain.com",
+		Fingerprint: "live-fingerprint",
+		NotAfter:    time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+
+	t.Run("finds keep certificate from live fingerprint and deletes older ones", func(t *testing.T) {
+		var deleted []string
+		provider := &Provider{
+			cfg: Config{
+				AutoApply: AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+			},
+			listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+				return []certificateRecord{
+					{
+						id:            "keep-cert",
+						domains:       []string{domain},
+						notAfter:      time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+					{
+						id:            "old-cert",
+						domains:       []string{domain},
+						notAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+				}, nil
+			},
+			downloadCertificateFunc: func(ctx context.Context, domain, certificateID string) (*providerpkg.CertificateMaterial, error) {
+				fingerprint := "old-fingerprint"
+				notAfter := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+				if certificateID == "keep-cert" {
+					fingerprint = live.Fingerprint
+					notAfter = time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+				}
+				return &providerpkg.CertificateMaterial{
+					CertificateID: certificateID,
+					Fingerprint:   fingerprint,
+					NotAfter:      notAfter,
+				}, nil
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				deleted = append(deleted, certificateIDs...)
+				return nil, nil
+			},
+		}
+
+		err := provider.CleanupUnusedOldCertificates(context.Background(), live.Domain, live, providerpkg.CleanupOptions{
+			ManagedDomains: []string{live.Domain},
+		})
+		if err != nil {
+			t.Fatalf("CleanupUnusedOldCertificates() error = %v", err)
+		}
+		if len(deleted) != 1 || deleted[0] != "old-cert" {
+			t.Fatalf("deleted = %#v, want %#v", deleted, []string{"old-cert"})
+		}
+	})
+
+	t.Run("skips cleanup when no provider certificate matches live fingerprint", func(t *testing.T) {
+		deleted := false
+		provider := &Provider{
+			cfg: Config{
+				AutoApply: AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+			},
+			listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+				return []certificateRecord{
+					{
+						id:            "other-cert",
+						domains:       []string{domain},
+						notAfter:      time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+						allowDownload: true,
+					},
+				}, nil
+			},
+			downloadCertificateFunc: func(ctx context.Context, domain, certificateID string) (*providerpkg.CertificateMaterial, error) {
+				return &providerpkg.CertificateMaterial{
+					CertificateID: certificateID,
+					Fingerprint:   "other-fingerprint",
+					NotAfter:      time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+				}, nil
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				deleted = true
+				return nil, nil
+			},
+		}
+
+		err := provider.CleanupUnusedOldCertificates(context.Background(), live.Domain, live, providerpkg.CleanupOptions{
+			ManagedDomains: []string{live.Domain},
+		})
+		if err != nil {
+			t.Fatalf("CleanupUnusedOldCertificates() error = %v", err)
+		}
+		if deleted {
+			t.Fatal("DeleteCertificates should not be called when keep certificate cannot be identified")
+		}
+	})
+}
+
+func TestProviderCleanupExpiredCertificates(t *testing.T) {
+	var deleted []string
+	provider := &Provider{
+		cfg: Config{
+			AutoApply: AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+		},
+		listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+			return []certificateRecord{
+				{
+					id:       "expired-cert-1",
+					notAfter: time.Now().Add(-24 * time.Hour),
+				},
+				{
+					id:       "valid-cert",
+					notAfter: time.Now().Add(24 * time.Hour),
+				},
+				{
+					id:       "expired-cert-2",
+					notAfter: time.Now().Add(-48 * time.Hour),
+				},
+			}, nil
+		},
+		deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+			deleted = append(deleted, certificateIDs...)
+			return nil, nil
+		},
+	}
+
+	err := provider.CleanupExpiredCertificates(context.Background())
+	if err != nil {
+		t.Fatalf("CleanupExpiredCertificates() error = %v", err)
+	}
+	if len(deleted) != 2 {
+		t.Fatalf("deleted = %#v, want 2 expired certificates", deleted)
+	}
+}

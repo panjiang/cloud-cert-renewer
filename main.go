@@ -11,12 +11,16 @@ import (
 )
 
 var configFilePath string
-var onceMode bool
+var runOnceMode bool
+var cleanupConfiguredOldMode bool
+var cleanupAllExpiredMode bool
 var showVersion bool
 
 func init() {
 	flag.StringVar(&configFilePath, "config", "config.yaml", "Config file path")
-	flag.BoolVar(&onceMode, "once", false, "Run one normal check/update round and exit")
+	flag.BoolVar(&runOnceMode, "run-once", false, "Run one normal check/update round and exit")
+	flag.BoolVar(&cleanupConfiguredOldMode, "cleanup-configured-old", false, "Delete old certificates for all configured domains and exit")
+	flag.BoolVar(&cleanupAllExpiredMode, "cleanup-all-expired", false, "Delete all expired Tencent Cloud certificates and exit")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 }
 
@@ -28,6 +32,8 @@ func main() {
 type updaterRunner interface {
 	Run()
 	RunOnce(options CheckOptions) CheckResult
+	CleanupUnusedOldCertificates() error
+	CleanupExpiredCertificates() error
 }
 
 func run() int {
@@ -46,7 +52,9 @@ func run() int {
 
 	zap.L().Info("starting cert-renewer",
 		zap.String("config", configFilePath),
-		zap.Bool("once", onceMode))
+		zap.Bool("runOnce", runOnceMode),
+		zap.Bool("cleanupConfiguredOld", cleanupConfiguredOldMode),
+		zap.Bool("cleanupAllExpired", cleanupAllExpiredMode))
 
 	cfg, err := LoadConfig(configFilePath)
 	if err != nil {
@@ -74,13 +82,22 @@ func run() int {
 		zap.Duration("beforeExpired", cfg.Alert.BeforeExpired),
 		zap.Duration("checkInterval", cfg.Alert.CheckInterval),
 		zap.String("logLevel", cfg.Log.Level),
-		zap.Bool("once", onceMode))
+		zap.Bool("runOnce", runOnceMode),
+		zap.Bool("cleanupConfiguredOld", cleanupConfiguredOldMode),
+		zap.Bool("cleanupAllExpired", cleanupAllExpiredMode))
 
-	return executeRun(updater, onceMode)
+	if runOnceMode && (cleanupConfiguredOldMode || cleanupAllExpiredMode) {
+		zap.L().Error("invalid flags: -run-once cannot be combined with cleanup flags")
+		return 1
+	}
+	if cleanupConfiguredOldMode || cleanupAllExpiredMode {
+		return executeCleanup(updater, cleanupConfiguredOldMode, cleanupAllExpiredMode)
+	}
+	return executeRun(updater, runOnceMode)
 }
 
-func executeRun(updater updaterRunner, once bool) int {
-	if !once {
+func executeRun(updater updaterRunner, runOnce bool) int {
+	if !runOnce {
 		updater.Run()
 		return 0
 	}
@@ -88,6 +105,22 @@ func executeRun(updater updaterRunner, once bool) int {
 	result := updater.RunOnce(CheckOptions{})
 	if result.Failures > 0 {
 		return 1
+	}
+	return 0
+}
+
+func executeCleanup(updater updaterRunner, cleanupUnused, cleanupExpired bool) int {
+	if cleanupUnused {
+		if err := updater.CleanupUnusedOldCertificates(); err != nil {
+			zap.L().Error("cleanup unused old certificates failed", zap.Error(err))
+			return 1
+		}
+	}
+	if cleanupExpired {
+		if err := updater.CleanupExpiredCertificates(); err != nil {
+			zap.L().Error("cleanup expired certificates failed", zap.Error(err))
+			return 1
+		}
 	}
 	return 0
 }

@@ -131,7 +131,7 @@ Configuration notes:
 Run one normal round before starting the service:
 
 ```sh
-sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -once
+sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -run-once
 ```
 
 This is not a dry-run. It may download or apply certificates, replace local files, run `postCommands`, run `globalPostCommands`, verify the external certificate, and trigger old certificate cleanup.
@@ -139,6 +139,25 @@ This is not a dry-run. It may download or apply certificates, replace local file
 Use it to validate the configuration and operational flow before enabling the service.
 
 Make sure the `cert-renewer` service is not already running when you execute it.
+
+## Cleanup (Optional)
+
+Delete old certificates for all configured domains:
+
+```sh
+sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -cleanup-configured-old
+```
+
+This follows the same old-certificate cleanup rules as the normal update flow, but applies them across all configured domains.
+
+Delete all expired Tencent Cloud certificates:
+
+```sh
+sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -cleanup-all-expired
+```
+
+This cleanup command is explicit and does not depend on `autoDeleteOldCertificates`.
+It deletes expired Tencent Cloud server certificates visible to the configured account.
 
 ## Daemon
 

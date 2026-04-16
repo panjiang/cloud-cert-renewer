@@ -56,18 +56,22 @@ func (n *fakeUpdaterNotifier) Failure(title, content string) {
 }
 
 type fakeUpdaterProvider struct {
-	mu                 sync.Mutex
-	calls              int
-	cleanupCalls       int
-	lastOptions        providerpkg.ResolveOptions
-	lastCleanupOptions providerpkg.CleanupOptions
-	lastCleanupDomain  string
-	lastCleanupKeep    *providerpkg.CertificateMaterial
-	lastCleanupLive    *providerpkg.ObservedCertificate
-	resolution         *providerpkg.CertificateResolution
-	err                error
-	resolveFunc        func(ctx context.Context, domain string, current *providerpkg.ObservedCertificate, options providerpkg.ResolveOptions) (*providerpkg.CertificateResolution, error)
-	cleanupFunc        func(ctx context.Context, domain string, keep *providerpkg.CertificateMaterial, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error
+	mu                  sync.Mutex
+	calls               int
+	cleanupCalls        int
+	cleanupUnusedCalls  int
+	cleanupExpiredCalls int
+	lastOptions         providerpkg.ResolveOptions
+	lastCleanupOptions  providerpkg.CleanupOptions
+	lastCleanupDomain   string
+	lastCleanupKeep     *providerpkg.CertificateMaterial
+	lastCleanupLive     *providerpkg.ObservedCertificate
+	resolution          *providerpkg.CertificateResolution
+	err                 error
+	resolveFunc         func(ctx context.Context, domain string, current *providerpkg.ObservedCertificate, options providerpkg.ResolveOptions) (*providerpkg.CertificateResolution, error)
+	cleanupFunc         func(ctx context.Context, domain string, keep *providerpkg.CertificateMaterial, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error
+	cleanupUnusedFunc   func(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error
+	cleanupExpiredFunc  func(ctx context.Context) error
 }
 
 func (p *fakeUpdaterProvider) ResolveCertificate(ctx context.Context, domain string, current *providerpkg.ObservedCertificate, options providerpkg.ResolveOptions) (*providerpkg.CertificateResolution, error) {
@@ -100,6 +104,33 @@ func (p *fakeUpdaterProvider) CleanupOldCertificates(ctx context.Context, domain
 
 	if cleanupFunc != nil {
 		return cleanupFunc(ctx, domain, keep, live, options)
+	}
+	return nil
+}
+
+func (p *fakeUpdaterProvider) CleanupUnusedOldCertificates(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error {
+	p.mu.Lock()
+	p.cleanupUnusedCalls++
+	p.lastCleanupDomain = domain
+	p.lastCleanupLive = live
+	p.lastCleanupOptions = options
+	cleanupUnusedFunc := p.cleanupUnusedFunc
+	p.mu.Unlock()
+
+	if cleanupUnusedFunc != nil {
+		return cleanupUnusedFunc(ctx, domain, live, options)
+	}
+	return nil
+}
+
+func (p *fakeUpdaterProvider) CleanupExpiredCertificates(ctx context.Context) error {
+	p.mu.Lock()
+	p.cleanupExpiredCalls++
+	cleanupExpiredFunc := p.cleanupExpiredFunc
+	p.mu.Unlock()
+
+	if cleanupExpiredFunc != nil {
+		return cleanupExpiredFunc(ctx)
 	}
 	return nil
 }
@@ -527,5 +558,53 @@ func TestUpdaterRunOnceStopsAfterGlobalCommandFailure(t *testing.T) {
 	}
 	if provider.calls != 1 {
 		t.Fatalf("provider calls = %d, want 1 because second domain should not start", provider.calls)
+	}
+}
+
+func TestUpdaterCleanupUnusedOldCertificates(t *testing.T) {
+	provider := &fakeUpdaterProvider{}
+	updater := &Updater{
+		cfg: &Config{
+			Domains: []DomainConfig{
+				{Domain: "doc.example.com", EffectiveProvider: ProviderTencentCloud},
+				{Domain: "api.example.com", EffectiveProvider: ProviderTencentCloud},
+			},
+		},
+		providers: map[string]providerpkg.Provider{ProviderTencentCloud: provider},
+		ctx:       context.Background(),
+		probeCertificate: func(ctx context.Context, domain string) (*ObservedCertificate, error) {
+			return &ObservedCertificate{
+				Domain:      domain,
+				Fingerprint: "live-" + domain,
+				NotAfter:    time.Now().Add(24 * time.Hour),
+			}, nil
+		},
+	}
+
+	err := updater.CleanupUnusedOldCertificates()
+	if err != nil {
+		t.Fatalf("CleanupUnusedOldCertificates() error = %v", err)
+	}
+	if provider.cleanupUnusedCalls != 2 {
+		t.Fatalf("cleanupUnusedCalls = %d, want 2", provider.cleanupUnusedCalls)
+	}
+	if len(provider.lastCleanupOptions.ManagedDomains) != 2 {
+		t.Fatalf("ManagedDomains = %#v, want 2 entries", provider.lastCleanupOptions.ManagedDomains)
+	}
+}
+
+func TestUpdaterCleanupExpiredCertificates(t *testing.T) {
+	provider := &fakeUpdaterProvider{}
+	updater := &Updater{
+		providers: map[string]providerpkg.Provider{ProviderTencentCloud: provider},
+		ctx:       context.Background(),
+	}
+
+	err := updater.CleanupExpiredCertificates()
+	if err != nil {
+		t.Fatalf("CleanupExpiredCertificates() error = %v", err)
+	}
+	if provider.cleanupExpiredCalls != 1 {
+		t.Fatalf("cleanupExpiredCalls = %d, want 1", provider.cleanupExpiredCalls)
 	}
 }

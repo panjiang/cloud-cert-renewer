@@ -7,10 +7,14 @@ import (
 )
 
 type fakeUpdaterRunner struct {
-	runCalls     int
-	runOnceCalls int
-	lastOptions  CheckOptions
-	result       CheckResult
+	runCalls            int
+	runOnceCalls        int
+	cleanupUnusedCalls  int
+	cleanupExpiredCalls int
+	lastOptions         CheckOptions
+	result              CheckResult
+	cleanupUnusedErr    error
+	cleanupExpiredErr   error
 }
 
 func (u *fakeUpdaterRunner) Run() {
@@ -21,6 +25,16 @@ func (u *fakeUpdaterRunner) RunOnce(options CheckOptions) CheckResult {
 	u.runOnceCalls++
 	u.lastOptions = options
 	return u.result
+}
+
+func (u *fakeUpdaterRunner) CleanupUnusedOldCertificates() error {
+	u.cleanupUnusedCalls++
+	return u.cleanupUnusedErr
+}
+
+func (u *fakeUpdaterRunner) CleanupExpiredCertificates() error {
+	u.cleanupExpiredCalls++
+	return u.cleanupExpiredErr
 }
 
 func TestExecuteRunDefaultMode(t *testing.T) {
@@ -69,6 +83,51 @@ func TestExecuteRunOnceModeFailure(t *testing.T) {
 	}
 	if updater.runOnceCalls != 1 {
 		t.Fatalf("runOnceCalls = %d, want 1", updater.runOnceCalls)
+	}
+}
+
+func TestExecuteCleanupUnusedSuccess(t *testing.T) {
+	updater := &fakeUpdaterRunner{}
+
+	exitCode := executeCleanup(updater, true, false)
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if updater.cleanupUnusedCalls != 1 {
+		t.Fatalf("cleanupUnusedCalls = %d, want 1", updater.cleanupUnusedCalls)
+	}
+	if updater.cleanupExpiredCalls != 0 {
+		t.Fatalf("cleanupExpiredCalls = %d, want 0", updater.cleanupExpiredCalls)
+	}
+}
+
+func TestExecuteCleanupExpiredSuccess(t *testing.T) {
+	updater := &fakeUpdaterRunner{}
+
+	exitCode := executeCleanup(updater, false, true)
+	if exitCode != 0 {
+		t.Fatalf("exitCode = %d, want 0", exitCode)
+	}
+	if updater.cleanupUnusedCalls != 0 {
+		t.Fatalf("cleanupUnusedCalls = %d, want 0", updater.cleanupUnusedCalls)
+	}
+	if updater.cleanupExpiredCalls != 1 {
+		t.Fatalf("cleanupExpiredCalls = %d, want 1", updater.cleanupExpiredCalls)
+	}
+}
+
+func TestExecuteCleanupFailure(t *testing.T) {
+	updater := &fakeUpdaterRunner{cleanupUnusedErr: io.EOF}
+
+	exitCode := executeCleanup(updater, true, true)
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+	if updater.cleanupUnusedCalls != 1 {
+		t.Fatalf("cleanupUnusedCalls = %d, want 1", updater.cleanupUnusedCalls)
+	}
+	if updater.cleanupExpiredCalls != 0 {
+		t.Fatalf("cleanupExpiredCalls = %d, want 0 after failure", updater.cleanupExpiredCalls)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	providerpkg "github.com/panjiang/cert-renewer/provider"
@@ -78,6 +79,58 @@ func (u *Updater) Run() {
 
 func (u *Updater) RunOnce(options CheckOptions) CheckResult {
 	return u.checkOnce(u.ctx, options)
+}
+
+func (u *Updater) CleanupUnusedOldCertificates() error {
+	managedDomains := u.managedDomains()
+	var failures []string
+
+	zap.L().Info("starting unused old certificate cleanup",
+		zap.Int("domains", len(u.cfg.Domains)))
+
+	for _, domain := range u.cfg.Domains {
+		provider, err := resolveProvider(u.providers, domain)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: resolve provider: %v", domain.Domain, err))
+			continue
+		}
+
+		live, err := u.probeCertificate(u.ctx, domain.Domain)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: probe current certificate: %v", domain.Domain, err))
+			continue
+		}
+
+		if err := provider.CleanupUnusedOldCertificates(u.ctx, domain.Domain, toProviderObservedCertificate(live), providerpkg.CleanupOptions{
+			ManagedDomains: managedDomains,
+		}); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: cleanup unused old certificates: %v", domain.Domain, err))
+			continue
+		}
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func (u *Updater) CleanupExpiredCertificates() error {
+	var failures []string
+
+	zap.L().Info("starting expired certificate cleanup",
+		zap.Int("providers", len(u.providers)))
+
+	for name, provider := range u.providers {
+		if err := provider.CleanupExpiredCertificates(u.ctx); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf(strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 func (u *Updater) checkOnce(ctx context.Context, options CheckOptions) CheckResult {
