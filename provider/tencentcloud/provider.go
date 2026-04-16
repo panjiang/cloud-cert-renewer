@@ -140,36 +140,62 @@ func (c *Provider) CleanupOldCertificates(ctx context.Context, domain string, ke
 }
 
 func (c *Provider) CleanupUnusedOldCertificates(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error {
+	candidates, err := c.ListUnusedOldCertificateCleanupCandidates(ctx, domain, live, options)
+	if err != nil {
+		return err
+	}
+	return c.deleteCleanupCandidates(ctx, candidates, domain, "")
+}
+
+func (c *Provider) ListUnusedOldCertificateCleanupCandidates(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) ([]providerpkg.CleanupCandidate, error) {
 	if live == nil || strings.TrimSpace(live.Fingerprint) == "" {
 		zap.L().Warn("skipping unused old certificate cleanup because live certificate fingerprint is unavailable",
 			zap.String("provider", "tencentcloud"),
 			zap.String("domain", domain))
-		return nil
+		return nil, nil
 	}
 
 	keep, err := c.findKeepCertificateForLiveCertificate(ctx, domain, live)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if keep == nil {
 		zap.L().Warn("skipping unused old certificate cleanup because no provider certificate matches the live certificate",
 			zap.String("provider", "tencentcloud"),
 			zap.String("domain", domain),
 			zap.String("fingerprint", live.Fingerprint))
-		return nil
+		return nil, nil
 	}
 
-	return c.cleanupOldCertificates(ctx, domain, keep, live, options)
+	records, err := c.findCleanupCandidates(ctx, domain, keep, live, options.ManagedDomains)
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]providerpkg.CleanupCandidate, 0, len(records))
+	for _, record := range records {
+		candidate := cleanupCandidateFromRecord(providerpkg.CleanupTypeConfiguredOld, domain, record)
+		candidate.CurrentNotAfter = live.NotAfter
+		candidates = append(candidates, candidate)
+	}
+	return candidates, nil
 }
 
 func (c *Provider) CleanupExpiredCertificates(ctx context.Context) error {
-	now := time.Now()
-	records, err := c.listCertificates(ctx, "", false)
+	candidates, err := c.ListExpiredCertificateCleanupCandidates(ctx)
 	if err != nil {
 		return err
 	}
+	return c.deleteCleanupCandidates(ctx, candidates, "expired_cleanup", "")
+}
 
-	expiredIDs := make([]string, 0, len(records))
+func (c *Provider) ListExpiredCertificateCleanupCandidates(ctx context.Context) ([]providerpkg.CleanupCandidate, error) {
+	now := time.Now()
+	records, err := c.listCertificates(ctx, "", false)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]providerpkg.CleanupCandidate, 0, len(records))
 	for _, record := range records {
 		if record.id == "" || record.notAfter.IsZero() {
 			continue
@@ -177,29 +203,42 @@ func (c *Provider) CleanupExpiredCertificates(ctx context.Context) error {
 		if !record.notAfter.Before(now) {
 			continue
 		}
-		expiredIDs = append(expiredIDs, record.id)
+		candidates = append(candidates, cleanupCandidateFromRecord(providerpkg.CleanupTypeAllExpired, record.domain, record))
 	}
-	if len(expiredIDs) == 0 {
+	if len(candidates) == 0 {
 		zap.L().Info("no expired certificates eligible for cleanup",
 			zap.String("provider", "tencentcloud"))
+		return nil, nil
+	}
+
+	return candidates, nil
+}
+
+func (c *Provider) DeleteCleanupCandidates(ctx context.Context, candidates []providerpkg.CleanupCandidate) error {
+	return c.deleteCleanupCandidates(ctx, candidates, "confirmed_cleanup", "")
+}
+
+func (c *Provider) deleteCleanupCandidates(ctx context.Context, candidates []providerpkg.CleanupCandidate, domain, keepCertificateID string) error {
+	candidateIDs := cleanupCandidateIDs(candidates)
+	if len(candidateIDs) == 0 {
 		return nil
 	}
 
-	zap.L().Info("deleting expired certificates",
+	zap.L().Info("deleting cleanup candidates",
 		zap.String("provider", "tencentcloud"),
-		zap.Int("certificates", len(expiredIDs)))
-	taskIDs, err := c.deleteCertificates(ctx, expiredIDs)
+		zap.Int("certificates", len(candidateIDs)))
+	taskIDs, err := c.deleteCertificates(ctx, candidateIDs)
 	if err != nil {
 		return err
 	}
 	if len(taskIDs) == 0 {
-		zap.L().Info("deleted expired certificates without async tasks",
+		zap.L().Info("deleted cleanup candidates without async tasks",
 			zap.String("provider", "tencentcloud"),
-			zap.Int("certificates", len(expiredIDs)))
+			zap.Int("certificates", len(candidateIDs)))
 		return nil
 	}
 
-	return c.waitDeleteTasks(ctx, "expired_cleanup", "", taskIDs)
+	return c.waitDeleteTasks(ctx, domain, keepCertificateID, taskIDs)
 }
 
 func (c *Provider) cleanupOldCertificates(ctx context.Context, domain string, keep *providerpkg.CertificateMaterial, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error {
@@ -516,6 +555,41 @@ func (c *Provider) recordCoversOtherManagedDomains(record certificateRecord, cur
 		}
 	}
 	return false
+}
+
+func cleanupCandidateFromRecord(cleanupType, domain string, record certificateRecord) providerpkg.CleanupCandidate {
+	certificateDomains := append([]string(nil), record.domains...)
+	if len(certificateDomains) == 0 && strings.TrimSpace(record.domain) != "" {
+		certificateDomains = append(certificateDomains, strings.TrimSpace(record.domain))
+	}
+	slices.Sort(certificateDomains)
+	certificateDomains = slices.Compact(certificateDomains)
+
+	return providerpkg.CleanupCandidate{
+		Provider:           "tencentcloud",
+		CleanupType:        cleanupType,
+		Domain:             strings.TrimSpace(domain),
+		CertificateID:      strings.TrimSpace(record.id),
+		CertificateDomains: certificateDomains,
+		NotAfter:           record.notAfter,
+	}
+}
+
+func cleanupCandidateIDs(candidates []providerpkg.CleanupCandidate) []string {
+	seen := make(map[string]struct{}, len(candidates))
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		id := strings.TrimSpace(candidate.CertificateID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func (c *Provider) listCertificates(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {

@@ -1,21 +1,42 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	providerpkg "github.com/panjiang/cert-renewer/provider"
 )
 
+type failingReader struct{}
+
+func (failingReader) Read(_ []byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
 type fakeUpdaterRunner struct {
-	runCalls            int
-	runOnceCalls        int
-	cleanupUnusedCalls  int
-	cleanupExpiredCalls int
-	lastOptions         CheckOptions
-	result              CheckResult
-	cleanupUnusedErr    error
-	cleanupExpiredErr   error
+	runCalls                   int
+	runOnceCalls               int
+	cleanupUnusedCalls         int
+	cleanupExpiredCalls        int
+	buildCleanupPlanCalls      int
+	deleteCleanupCandidateCall int
+	lastOptions                CheckOptions
+	result                     CheckResult
+	cleanupUnusedErr           error
+	cleanupExpiredErr          error
+	cleanupCandidates          []providerpkg.CleanupCandidate
+	buildCleanupPlanErr        error
+	deleteCleanupCandidatesErr error
+	lastCleanupUnused          bool
+	lastCleanupExpired         bool
+	lastDeletedCandidates      []providerpkg.CleanupCandidate
 }
 
 func (u *fakeUpdaterRunner) Run() {
@@ -36,6 +57,22 @@ func (u *fakeUpdaterRunner) CleanupUnusedOldCertificates() error {
 func (u *fakeUpdaterRunner) CleanupExpiredCertificates() error {
 	u.cleanupExpiredCalls++
 	return u.cleanupExpiredErr
+}
+
+func (u *fakeUpdaterRunner) BuildCleanupPlan(cleanupUnused, cleanupExpired bool) ([]providerpkg.CleanupCandidate, error) {
+	u.buildCleanupPlanCalls++
+	u.lastCleanupUnused = cleanupUnused
+	u.lastCleanupExpired = cleanupExpired
+	if u.buildCleanupPlanErr != nil {
+		return nil, u.buildCleanupPlanErr
+	}
+	return append([]providerpkg.CleanupCandidate(nil), u.cleanupCandidates...), nil
+}
+
+func (u *fakeUpdaterRunner) DeleteCleanupCandidates(candidates []providerpkg.CleanupCandidate) error {
+	u.deleteCleanupCandidateCall++
+	u.lastDeletedCandidates = append([]providerpkg.CleanupCandidate(nil), candidates...)
+	return u.deleteCleanupCandidatesErr
 }
 
 func TestExecuteRunDefaultMode(t *testing.T) {
@@ -87,48 +124,129 @@ func TestExecuteRunOnceModeFailure(t *testing.T) {
 	}
 }
 
-func TestExecuteCleanupUnusedSuccess(t *testing.T) {
-	updater := &fakeUpdaterRunner{}
+func TestExecuteCleanupConfirmsAndDeletes(t *testing.T) {
+	expiresAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	currentExpiresAt := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	updater := &fakeUpdaterRunner{
+		cleanupCandidates: []providerpkg.CleanupCandidate{{
+			Provider:           ProviderTencentCloud,
+			CleanupType:        providerpkg.CleanupTypeConfiguredOld,
+			Domain:             "doc.example.com",
+			CertificateID:      "cert-1",
+			CertificateDomains: []string{"doc.example.com"},
+			NotAfter:           expiresAt,
+			CurrentNotAfter:    currentExpiresAt,
+		}},
+	}
+	var output bytes.Buffer
 
-	exitCode := executeCleanup(updater, true, false)
+	exitCode := executeCleanupWithIO(updater, true, false, strings.NewReader("Y\n"), &output)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", exitCode)
 	}
-	if updater.cleanupUnusedCalls != 1 {
-		t.Fatalf("cleanupUnusedCalls = %d, want 1", updater.cleanupUnusedCalls)
+	if updater.buildCleanupPlanCalls != 1 {
+		t.Fatalf("buildCleanupPlanCalls = %d, want 1", updater.buildCleanupPlanCalls)
 	}
-	if updater.cleanupExpiredCalls != 0 {
-		t.Fatalf("cleanupExpiredCalls = %d, want 0", updater.cleanupExpiredCalls)
+	if !updater.lastCleanupUnused || updater.lastCleanupExpired {
+		t.Fatalf("cleanup flags = (%v, %v), want (true, false)", updater.lastCleanupUnused, updater.lastCleanupExpired)
+	}
+	if updater.deleteCleanupCandidateCall != 1 {
+		t.Fatalf("deleteCleanupCandidateCall = %d, want 1", updater.deleteCleanupCandidateCall)
+	}
+	if len(updater.lastDeletedCandidates) != 1 || updater.lastDeletedCandidates[0].CertificateID != "cert-1" {
+		t.Fatalf("lastDeletedCandidates = %#v, want cert-1", updater.lastDeletedCandidates)
+	}
+	gotOutput := output.String()
+	for _, want := range []string{
+		"TYPE | PROVIDER | CERT_DOMAINS | CERT_ID | EXPIRES_AT | CURRENT_EXPIRES_AT",
+		"configured-old | tencentcloud | doc.example.com | cert-1 | 2026-01-02 | 2026-02-03",
+		"Type Y to delete these certificates:",
+		"Deleted 1 certificate(s).",
+	} {
+		if !strings.Contains(gotOutput, want) {
+			t.Fatalf("output = %q, want to contain %q", gotOutput, want)
+		}
+	}
+	if strings.Contains(gotOutput, "CONFIG_DOMAIN") {
+		t.Fatalf("output = %q, should not contain CONFIG_DOMAIN", gotOutput)
 	}
 }
 
-func TestExecuteCleanupExpiredSuccess(t *testing.T) {
-	updater := &fakeUpdaterRunner{}
+func TestExecuteCleanupCancelsWithoutUppercaseY(t *testing.T) {
+	for _, input := range []string{"n\n", "\n", "y\n", ""} {
+		t.Run(fmt.Sprintf("input=%q", input), func(t *testing.T) {
+			updater := &fakeUpdaterRunner{
+				cleanupCandidates: []providerpkg.CleanupCandidate{{
+					Provider:      ProviderTencentCloud,
+					CleanupType:   providerpkg.CleanupTypeAllExpired,
+					CertificateID: "cert-1",
+				}},
+			}
+			var output bytes.Buffer
 
-	exitCode := executeCleanup(updater, false, true)
+			exitCode := executeCleanupWithIO(updater, false, true, strings.NewReader(input), &output)
+			if exitCode != 0 {
+				t.Fatalf("exitCode = %d, want 0", exitCode)
+			}
+			if updater.deleteCleanupCandidateCall != 0 {
+				t.Fatalf("deleteCleanupCandidateCall = %d, want 0", updater.deleteCleanupCandidateCall)
+			}
+			if !strings.Contains(output.String(), "Cleanup cancelled; no certificates deleted.") {
+				t.Fatalf("output = %q, want cancellation message", output.String())
+			}
+		})
+	}
+}
+
+func TestExecuteCleanupNoCandidates(t *testing.T) {
+	updater := &fakeUpdaterRunner{}
+	var output bytes.Buffer
+
+	exitCode := executeCleanupWithIO(updater, true, true, strings.NewReader("Y\n"), &output)
 	if exitCode != 0 {
 		t.Fatalf("exitCode = %d, want 0", exitCode)
 	}
-	if updater.cleanupUnusedCalls != 0 {
-		t.Fatalf("cleanupUnusedCalls = %d, want 0", updater.cleanupUnusedCalls)
+	if updater.deleteCleanupCandidateCall != 0 {
+		t.Fatalf("deleteCleanupCandidateCall = %d, want 0", updater.deleteCleanupCandidateCall)
 	}
-	if updater.cleanupExpiredCalls != 1 {
-		t.Fatalf("cleanupExpiredCalls = %d, want 1", updater.cleanupExpiredCalls)
+	gotOutput := output.String()
+	if !strings.Contains(gotOutput, "No cleanup candidates found.") {
+		t.Fatalf("output = %q, want no-candidates message", gotOutput)
+	}
+	if strings.Contains(gotOutput, "Type Y") {
+		t.Fatalf("output = %q, want no confirmation prompt", gotOutput)
 	}
 }
 
-func TestExecuteCleanupFailure(t *testing.T) {
-	updater := &fakeUpdaterRunner{cleanupUnusedErr: io.EOF}
+func TestExecuteCleanupBuildFailure(t *testing.T) {
+	updater := &fakeUpdaterRunner{buildCleanupPlanErr: io.EOF}
+	var output bytes.Buffer
 
-	exitCode := executeCleanup(updater, true, true)
+	exitCode := executeCleanupWithIO(updater, true, true, strings.NewReader("Y\n"), &output)
 	if exitCode != 1 {
 		t.Fatalf("exitCode = %d, want 1", exitCode)
 	}
-	if updater.cleanupUnusedCalls != 1 {
-		t.Fatalf("cleanupUnusedCalls = %d, want 1", updater.cleanupUnusedCalls)
+	if updater.deleteCleanupCandidateCall != 0 {
+		t.Fatalf("deleteCleanupCandidateCall = %d, want 0 after failure", updater.deleteCleanupCandidateCall)
 	}
-	if updater.cleanupExpiredCalls != 0 {
-		t.Fatalf("cleanupExpiredCalls = %d, want 0 after failure", updater.cleanupExpiredCalls)
+}
+
+func TestExecuteCleanupReadFailure(t *testing.T) {
+	updater := &fakeUpdaterRunner{
+		cleanupCandidates: []providerpkg.CleanupCandidate{{
+			Provider:      ProviderTencentCloud,
+			CleanupType:   providerpkg.CleanupTypeAllExpired,
+			CertificateID: "cert-1",
+		}},
+	}
+	var output bytes.Buffer
+
+	exitCode := executeCleanupWithIO(updater, true, true, failingReader{}, &output)
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+	if updater.deleteCleanupCandidateCall != 0 {
+		t.Fatalf("deleteCleanupCandidateCall = %d, want 0 after read failure", updater.deleteCleanupCandidateCall)
 	}
 }
 

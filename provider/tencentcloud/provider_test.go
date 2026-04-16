@@ -761,6 +761,78 @@ func TestProviderCleanupUnusedOldCertificates(t *testing.T) {
 	})
 }
 
+func TestProviderListUnusedOldCertificateCleanupCandidates(t *testing.T) {
+	live := &providerpkg.ObservedCertificate{
+		Domain:      "doc.yourdomain.com",
+		Fingerprint: "live-fingerprint",
+		NotAfter:    time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+	}
+	deleted := false
+	provider := &Provider{
+		listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+			return []certificateRecord{
+				{
+					id:            "keep-cert",
+					domain:        domain,
+					domains:       []string{domain},
+					notAfter:      time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+					allowDownload: true,
+				},
+				{
+					id:            "old-cert",
+					domain:        domain,
+					domains:       []string{domain, "alt.yourdomain.com"},
+					notAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+					allowDownload: true,
+				},
+			}, nil
+		},
+		downloadCertificateFunc: func(ctx context.Context, domain, certificateID string) (*providerpkg.CertificateMaterial, error) {
+			fingerprint := "old-fingerprint"
+			notAfter := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			if certificateID == "keep-cert" {
+				fingerprint = live.Fingerprint
+				notAfter = time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+			}
+			return &providerpkg.CertificateMaterial{
+				CertificateID: certificateID,
+				Fingerprint:   fingerprint,
+				NotAfter:      notAfter,
+			}, nil
+		},
+		deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+			deleted = true
+			return nil, nil
+		},
+	}
+
+	candidates, err := provider.ListUnusedOldCertificateCleanupCandidates(context.Background(), live.Domain, live, providerpkg.CleanupOptions{
+		ManagedDomains: []string{live.Domain},
+	})
+	if err != nil {
+		t.Fatalf("ListUnusedOldCertificateCleanupCandidates() error = %v", err)
+	}
+	if deleted {
+		t.Fatal("DeleteCertificates should not be called while listing candidates")
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, want 1", candidates)
+	}
+	candidate := candidates[0]
+	if candidate.Provider != "tencentcloud" || candidate.CleanupType != providerpkg.CleanupTypeConfiguredOld || candidate.Domain != live.Domain || candidate.CertificateID != "old-cert" {
+		t.Fatalf("candidate = %#v, want configured-old old-cert for %s", candidate, live.Domain)
+	}
+	if candidate.NotAfter != time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) {
+		t.Fatalf("candidate.NotAfter = %s, want 2026-01-01", candidate.NotAfter)
+	}
+	if !candidate.CurrentNotAfter.Equal(live.NotAfter) {
+		t.Fatalf("candidate.CurrentNotAfter = %s, want %s", candidate.CurrentNotAfter, live.NotAfter)
+	}
+	if len(candidate.CertificateDomains) != 2 || candidate.CertificateDomains[0] != "alt.yourdomain.com" || candidate.CertificateDomains[1] != live.Domain {
+		t.Fatalf("candidate.CertificateDomains = %#v, want sorted metadata domains", candidate.CertificateDomains)
+	}
+}
+
 func TestProviderCleanupExpiredCertificates(t *testing.T) {
 	var deleted []string
 	provider := &Provider{
@@ -796,4 +868,103 @@ func TestProviderCleanupExpiredCertificates(t *testing.T) {
 	if len(deleted) != 2 {
 		t.Fatalf("deleted = %#v, want 2 expired certificates", deleted)
 	}
+}
+
+func TestProviderListExpiredCertificateCleanupCandidates(t *testing.T) {
+	expiredAt := time.Now().Add(-24 * time.Hour)
+	provider := &Provider{
+		listCertificatesFunc: func(ctx context.Context, domain string, deployableOnly bool) ([]certificateRecord, error) {
+			return []certificateRecord{
+				{
+					id:       "expired-cert",
+					domain:   "doc.yourdomain.com",
+					domains:  []string{"doc.yourdomain.com", "alt.yourdomain.com"},
+					notAfter: expiredAt,
+				},
+				{
+					id:       "valid-cert",
+					domain:   "valid.yourdomain.com",
+					notAfter: time.Now().Add(24 * time.Hour),
+				},
+			}, nil
+		},
+		deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+			t.Fatal("DeleteCertificates should not be called while listing candidates")
+			return nil, nil
+		},
+	}
+
+	candidates, err := provider.ListExpiredCertificateCleanupCandidates(context.Background())
+	if err != nil {
+		t.Fatalf("ListExpiredCertificateCleanupCandidates() error = %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, want 1", candidates)
+	}
+	candidate := candidates[0]
+	if candidate.Provider != "tencentcloud" || candidate.CleanupType != providerpkg.CleanupTypeAllExpired || candidate.Domain != "doc.yourdomain.com" || candidate.CertificateID != "expired-cert" {
+		t.Fatalf("candidate = %#v, want expired-cert metadata", candidate)
+	}
+	if !candidate.NotAfter.Equal(expiredAt) {
+		t.Fatalf("candidate.NotAfter = %s, want %s", candidate.NotAfter, expiredAt)
+	}
+	if !candidate.CurrentNotAfter.IsZero() {
+		t.Fatalf("candidate.CurrentNotAfter = %s, want zero", candidate.CurrentNotAfter)
+	}
+	if len(candidate.CertificateDomains) != 2 || candidate.CertificateDomains[0] != "alt.yourdomain.com" || candidate.CertificateDomains[1] != "doc.yourdomain.com" {
+		t.Fatalf("candidate.CertificateDomains = %#v, want sorted metadata domains", candidate.CertificateDomains)
+	}
+}
+
+func TestProviderDeleteCleanupCandidates(t *testing.T) {
+	t.Run("deletes listed candidates", func(t *testing.T) {
+		var deleted []string
+		provider := &Provider{
+			cfg: Config{
+				AutoApply: AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				deleted = append(deleted, certificateIDs...)
+				return nil, nil
+			},
+		}
+
+		err := provider.DeleteCleanupCandidates(context.Background(), []providerpkg.CleanupCandidate{
+			{Provider: "tencentcloud", CertificateID: "cert-1"},
+			{Provider: "tencentcloud", CertificateID: "cert-1"},
+			{Provider: "tencentcloud", CertificateID: "cert-2"},
+		})
+		if err != nil {
+			t.Fatalf("DeleteCleanupCandidates() error = %v", err)
+		}
+		if len(deleted) != 2 || deleted[0] != "cert-1" || deleted[1] != "cert-2" {
+			t.Fatalf("deleted = %#v, want unique cert-1/cert-2", deleted)
+		}
+	})
+
+	t.Run("returns error when delete task fails", func(t *testing.T) {
+		provider := &Provider{
+			cfg: Config{
+				AutoApply: AutoApplyConfig{PollInterval: time.Millisecond, PollTimeout: time.Second},
+			},
+			deleteCertificatesFunc: func(ctx context.Context, certificateIDs []string) ([]string, error) {
+				return []string{"task-1"}, nil
+			},
+			describeDeleteTaskResultsFunc: func(ctx context.Context, taskIDs []string) ([]deleteTaskResult, error) {
+				return []deleteTaskResult{{
+					taskID:        "task-1",
+					certificateID: "cert-1",
+					status:        4,
+					err:           "resource still bound",
+				}}, nil
+			},
+		}
+
+		err := provider.DeleteCleanupCandidates(context.Background(), []providerpkg.CleanupCandidate{
+			{Provider: "tencentcloud", CertificateID: "cert-1"},
+		})
+		if err == nil {
+			t.Fatal("DeleteCleanupCandidates() expected error")
+		}
+	})
 }

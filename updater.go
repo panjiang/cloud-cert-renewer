@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,6 +125,94 @@ func (u *Updater) CleanupExpiredCertificates() error {
 	for name, provider := range u.providers {
 		if err := provider.CleanupExpiredCertificates(u.ctx); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf(strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func (u *Updater) BuildCleanupPlan(cleanupUnused, cleanupExpired bool) ([]providerpkg.CleanupCandidate, error) {
+	var failures []string
+	var candidates []providerpkg.CleanupCandidate
+
+	if cleanupUnused {
+		managedDomains := u.managedDomains()
+		zap.L().Info("building unused old certificate cleanup plan",
+			zap.Int("domains", len(u.cfg.Domains)))
+
+		for _, domain := range u.cfg.Domains {
+			provider, err := resolveProvider(u.providers, domain)
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: resolve provider: %v", domain.Domain, err))
+				continue
+			}
+
+			live, err := u.probeCertificate(u.ctx, domain.Domain)
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: probe current certificate: %v", domain.Domain, err))
+				continue
+			}
+
+			domainCandidates, err := provider.ListUnusedOldCertificateCleanupCandidates(u.ctx, domain.Domain, toProviderObservedCertificate(live), providerpkg.CleanupOptions{
+				ManagedDomains: managedDomains,
+			})
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: list unused old certificate cleanup candidates: %v", domain.Domain, err))
+				continue
+			}
+			candidates = append(candidates, cleanupCandidatesWithProvider(domainCandidates, domain.EffectiveProvider)...)
+		}
+	}
+
+	if cleanupExpired {
+		zap.L().Info("building expired certificate cleanup plan",
+			zap.Int("providers", len(u.providers)))
+
+		for name, provider := range u.providers {
+			providerCandidates, err := provider.ListExpiredCertificateCleanupCandidates(u.ctx)
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+				continue
+			}
+			candidates = append(candidates, cleanupCandidatesWithProvider(providerCandidates, name)...)
+		}
+	}
+
+	if len(failures) > 0 {
+		return nil, fmt.Errorf(strings.Join(failures, "; "))
+	}
+	return mergeCleanupCandidates(candidates), nil
+}
+
+func (u *Updater) DeleteCleanupCandidates(candidates []providerpkg.CleanupCandidate) error {
+	candidates = mergeCleanupCandidates(candidates)
+	grouped := make(map[string][]providerpkg.CleanupCandidate)
+	for _, candidate := range candidates {
+		providerName := strings.TrimSpace(candidate.Provider)
+		if providerName == "" {
+			return fmt.Errorf("cleanup candidate %s missing provider", candidate.CertificateID)
+		}
+		grouped[providerName] = append(grouped[providerName], candidate)
+	}
+
+	providerNames := make([]string, 0, len(grouped))
+	for providerName := range grouped {
+		providerNames = append(providerNames, providerName)
+	}
+	slices.Sort(providerNames)
+
+	var failures []string
+	for _, providerName := range providerNames {
+		provider, ok := u.providers[providerName]
+		if !ok {
+			failures = append(failures, fmt.Sprintf("%s: provider not initialized", providerName))
+			continue
+		}
+		if err := provider.DeleteCleanupCandidates(u.ctx, grouped[providerName]); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", providerName, err))
 		}
 	}
 
@@ -428,6 +517,96 @@ func (u *Updater) managedDomains() []string {
 		domains = append(domains, item.Domain)
 	}
 	return domains
+}
+
+func cleanupCandidatesWithProvider(candidates []providerpkg.CleanupCandidate, providerName string) []providerpkg.CleanupCandidate {
+	result := make([]providerpkg.CleanupCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.Provider) == "" {
+			candidate.Provider = providerName
+		}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func mergeCleanupCandidates(candidates []providerpkg.CleanupCandidate) []providerpkg.CleanupCandidate {
+	indexByKey := make(map[string]int, len(candidates))
+	merged := make([]providerpkg.CleanupCandidate, 0, len(candidates))
+
+	for _, candidate := range candidates {
+		candidate.Provider = strings.TrimSpace(candidate.Provider)
+		candidate.CertificateID = strings.TrimSpace(candidate.CertificateID)
+		if candidate.Provider == "" || candidate.CertificateID == "" {
+			continue
+		}
+
+		key := cleanupCandidateKey(candidate)
+		if index, ok := indexByKey[key]; ok {
+			mergeCleanupCandidate(&merged[index], candidate)
+			continue
+		}
+
+		candidate.CleanupType = strings.TrimSpace(candidate.CleanupType)
+		candidate.Domain = strings.TrimSpace(candidate.Domain)
+		candidate.CertificateDomains = cleanupCandidateDomains(candidate.CertificateDomains)
+		indexByKey[key] = len(merged)
+		merged = append(merged, candidate)
+	}
+
+	return merged
+}
+
+func cleanupCandidateKey(candidate providerpkg.CleanupCandidate) string {
+	return candidate.Provider + "\x00" + candidate.CertificateID
+}
+
+func mergeCleanupCandidate(target *providerpkg.CleanupCandidate, source providerpkg.CleanupCandidate) {
+	target.CleanupType = appendUniqueCSV(target.CleanupType, source.CleanupType)
+	target.Domain = appendUniqueCSV(target.Domain, source.Domain)
+	if target.NotAfter.IsZero() && !source.NotAfter.IsZero() {
+		target.NotAfter = source.NotAfter
+	}
+	if target.CurrentNotAfter.IsZero() && !source.CurrentNotAfter.IsZero() {
+		target.CurrentNotAfter = source.CurrentNotAfter
+	}
+	target.CertificateDomains = cleanupCandidateDomains(append(target.CertificateDomains, source.CertificateDomains...))
+}
+
+func appendUniqueCSV(existing, value string) string {
+	seen := make(map[string]struct{})
+	values := make([]string, 0)
+
+	addItems := func(csv string) {
+		for _, item := range strings.Split(csv, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			values = append(values, item)
+		}
+	}
+
+	addItems(existing)
+	addItems(value)
+	return strings.Join(values, ",")
+}
+
+func cleanupCandidateDomains(domains []string) []string {
+	values := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
+		}
+		values = append(values, domain)
+	}
+	slices.Sort(values)
+	return slices.Compact(values)
 }
 
 func formatSuccessNotification(domain, certificateID string, notAfter time.Time) string {

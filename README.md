@@ -162,6 +162,7 @@ sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -cleanup-
 ```
 
 This follows the same old-certificate cleanup rules as the normal update flow, but applies them across all configured domains.
+Before deleting anything, the command prints the cleanup type, provider, certificate domains, certificate ID, certificate expiration date, and current live certificate expiration date. It only deletes after you type uppercase `Y`.
 
 Delete all expired Tencent Cloud certificates:
 
@@ -171,6 +172,7 @@ sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -cleanup-
 
 This cleanup command is explicit and does not depend on `autoDeleteOldCertificates`.
 It deletes expired Tencent Cloud server certificates visible to the configured account.
+It also prints the candidate certificate list first and only deletes after uppercase `Y` confirmation.
 
 ## Upgrade
 

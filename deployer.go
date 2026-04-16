@@ -154,7 +154,6 @@ func (d *LocalDeployer) RunGlobalCommands(ctx context.Context, commands []string
 }
 
 func (d *LocalDeployer) replaceLocalFiles(domain DomainConfig, material *CertificateMaterial, result *DeployResult) error {
-	timestamp := time.Now().Format("20060102T150405")
 	tempCertPath := fmt.Sprintf("%s.tmp.%d", domain.CertPath, time.Now().UnixNano())
 	tempKeyPath := fmt.Sprintf("%s.tmp.%d", domain.KeyPath, time.Now().UnixNano())
 
@@ -192,12 +191,12 @@ func (d *LocalDeployer) replaceLocalFiles(domain DomainConfig, material *Certifi
 		return fmt.Errorf("validate temp certificate files: %w", err)
 	}
 
-	if backupPath, err := backupLocalFile(domain.CertPath, timestamp); err != nil {
+	if backupPath, err := backupLocalCertificateFile(domain.CertPath, domain.CertPath); err != nil {
 		return fmt.Errorf("backup certificate: %w", err)
 	} else {
 		result.BackupCertPath = backupPath
 	}
-	if backupPath, err := backupLocalFile(domain.KeyPath, timestamp); err != nil {
+	if backupPath, err := backupLocalCertificateFile(domain.KeyPath, domain.CertPath); err != nil {
 		return fmt.Errorf("backup key: %w", err)
 	} else {
 		result.BackupKeyPath = backupPath
@@ -249,7 +248,39 @@ func writeLocalFile(path string, data []byte, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }
 
-func backupLocalFile(path, timestamp string) (string, error) {
+func backupLocalCertificateFile(path, certPath string) (string, error) {
+	expiresAt, ok, err := localCertificateExpiresAt(certPath)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", nil
+	}
+
+	backupDir := filepath.Join(filepath.Dir(certPath), "bak")
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return "", err
+	}
+	return backupLocalFile(path, backupDir, expiresAt)
+}
+
+func localCertificateExpiresAt(path string) (string, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	cert, err := firstCertificateFromPEM(data)
+	if err != nil {
+		return "", false, err
+	}
+	return cert.NotAfter.UTC().Format("20060102T150405Z"), true, nil
+}
+
+func backupLocalFile(path, backupDir, expiresAt string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -258,7 +289,7 @@ func backupLocalFile(path, timestamp string) (string, error) {
 		return "", err
 	}
 
-	backupPath := fmt.Sprintf("%s.bak.%s", path, timestamp)
+	backupPath := filepath.Join(backupDir, fmt.Sprintf("%s.expires_at_%s", filepath.Base(path), expiresAt))
 	if err := writeLocalFile(backupPath, data, resolveLocalMode(path, 0600)); err != nil {
 		return "", err
 	}

@@ -32,6 +32,21 @@ type CleanupOptions struct {
 	ManagedDomains []string
 }
 
+const (
+	CleanupTypeConfiguredOld = "configured-old"
+	CleanupTypeAllExpired    = "all-expired"
+)
+
+type CleanupCandidate struct {
+	Provider           string
+	CleanupType        string
+	Domain             string
+	CertificateID      string
+	CertificateDomains []string
+	NotAfter           time.Time
+	CurrentNotAfter    time.Time
+}
+
 type PendingCertificate struct {
 	CertificateID string
 	Status        uint64

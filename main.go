@@ -1,14 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
+	"time"
 
+	providerpkg "github.com/panjiang/cert-renewer/provider"
 	"go.uber.org/zap"
 )
 
@@ -38,6 +44,8 @@ type updaterRunner interface {
 	RunOnce(options CheckOptions) CheckResult
 	CleanupUnusedOldCertificates() error
 	CleanupExpiredCertificates() error
+	BuildCleanupPlan(cleanupUnused, cleanupExpired bool) ([]providerpkg.CleanupCandidate, error)
+	DeleteCleanupCandidates(candidates []providerpkg.CleanupCandidate) error
 }
 
 func run() int {
@@ -121,19 +129,109 @@ func executeRun(updater updaterRunner, runOnce bool) int {
 }
 
 func executeCleanup(updater updaterRunner, cleanupUnused, cleanupExpired bool) int {
-	if cleanupUnused {
-		if err := updater.CleanupUnusedOldCertificates(); err != nil {
-			zap.L().Error("cleanup unused old certificates failed", zap.Error(err))
-			return 1
-		}
+	return executeCleanupWithIO(updater, cleanupUnused, cleanupExpired, os.Stdin, os.Stdout)
+}
+
+func executeCleanupWithIO(updater updaterRunner, cleanupUnused, cleanupExpired bool, input io.Reader, output io.Writer) int {
+	candidates, err := updater.BuildCleanupPlan(cleanupUnused, cleanupExpired)
+	if err != nil {
+		zap.L().Error("build cleanup plan failed", zap.Error(err))
+		return 1
 	}
-	if cleanupExpired {
-		if err := updater.CleanupExpiredCertificates(); err != nil {
-			zap.L().Error("cleanup expired certificates failed", zap.Error(err))
-			return 1
-		}
+	if len(candidates) == 0 {
+		_, _ = fmt.Fprintln(output, "No cleanup candidates found.")
+		return 0
 	}
+
+	printCleanupCandidates(output, candidates)
+	_, _ = fmt.Fprint(output, "Type Y to delete these certificates: ")
+	confirmed, err := readCleanupConfirmation(input)
+	if err != nil {
+		zap.L().Error("read cleanup confirmation failed", zap.Error(err))
+		return 1
+	}
+	if !confirmed {
+		_, _ = fmt.Fprintln(output, "Cleanup cancelled; no certificates deleted.")
+		return 0
+	}
+
+	if err := updater.DeleteCleanupCandidates(candidates); err != nil {
+		zap.L().Error("delete cleanup candidates failed", zap.Error(err))
+		return 1
+	}
+	_, _ = fmt.Fprintf(output, "Deleted %d certificate(s).\n", len(candidates))
 	return 0
+}
+
+func readCleanupConfirmation(input io.Reader) (bool, error) {
+	line, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return strings.TrimSpace(line) == "Y", nil
+}
+
+func printCleanupCandidates(output io.Writer, candidates []providerpkg.CleanupCandidate) {
+	candidates = sortedCleanupCandidates(candidates)
+	_, _ = fmt.Fprintln(output, "TYPE | PROVIDER | CERT_DOMAINS | CERT_ID | EXPIRES_AT | CURRENT_EXPIRES_AT")
+	for _, candidate := range candidates {
+		_, _ = fmt.Fprintf(output, "%s | %s | %s | %s | %s | %s\n",
+			cleanupDisplayValue(candidate.CleanupType),
+			cleanupDisplayValue(candidate.Provider),
+			cleanupDisplayDomains(candidate.CertificateDomains),
+			cleanupDisplayValue(candidate.CertificateID),
+			cleanupDisplayTime(candidate.NotAfter),
+			cleanupDisplayTime(candidate.CurrentNotAfter))
+	}
+}
+
+func sortedCleanupCandidates(candidates []providerpkg.CleanupCandidate) []providerpkg.CleanupCandidate {
+	sorted := append([]providerpkg.CleanupCandidate(nil), candidates...)
+	slices.SortFunc(sorted, func(a, b providerpkg.CleanupCandidate) int {
+		for _, diff := range []int{
+			strings.Compare(a.CleanupType, b.CleanupType),
+			strings.Compare(a.Provider, b.Provider),
+			strings.Compare(a.Domain, b.Domain),
+			strings.Compare(a.CertificateID, b.CertificateID),
+		} {
+			if diff != 0 {
+				return diff
+			}
+		}
+		return a.NotAfter.Compare(b.NotAfter)
+	})
+	return sorted
+}
+
+func cleanupDisplayValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func cleanupDisplayDomains(domains []string) string {
+	values := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
+		}
+		values = append(values, domain)
+	}
+	if len(values) == 0 {
+		return "-"
+	}
+	slices.Sort(values)
+	return strings.Join(slices.Compact(values), ",")
+}
+
+func cleanupDisplayTime(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.Format(time.DateOnly)
 }
 
 func handleShutdown(stop func()) {

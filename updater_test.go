@@ -56,22 +56,29 @@ func (n *fakeUpdaterNotifier) Failure(title, content string) {
 }
 
 type fakeUpdaterProvider struct {
-	mu                  sync.Mutex
-	calls               int
-	cleanupCalls        int
-	cleanupUnusedCalls  int
-	cleanupExpiredCalls int
-	lastOptions         providerpkg.ResolveOptions
-	lastCleanupOptions  providerpkg.CleanupOptions
-	lastCleanupDomain   string
-	lastCleanupKeep     *providerpkg.CertificateMaterial
-	lastCleanupLive     *providerpkg.ObservedCertificate
-	resolution          *providerpkg.CertificateResolution
-	err                 error
-	resolveFunc         func(ctx context.Context, domain string, current *providerpkg.ObservedCertificate, options providerpkg.ResolveOptions) (*providerpkg.CertificateResolution, error)
-	cleanupFunc         func(ctx context.Context, domain string, keep *providerpkg.CertificateMaterial, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error
-	cleanupUnusedFunc   func(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error
-	cleanupExpiredFunc  func(ctx context.Context) error
+	mu                           sync.Mutex
+	calls                        int
+	cleanupCalls                 int
+	cleanupUnusedCalls           int
+	cleanupExpiredCalls          int
+	listUnusedCandidatesCalls    int
+	listExpiredCandidatesCalls   int
+	deleteCleanupCandidatesCalls int
+	lastOptions                  providerpkg.ResolveOptions
+	lastCleanupOptions           providerpkg.CleanupOptions
+	lastCleanupDomain            string
+	lastCleanupKeep              *providerpkg.CertificateMaterial
+	lastCleanupLive              *providerpkg.ObservedCertificate
+	lastCleanupCandidates        []providerpkg.CleanupCandidate
+	resolution                   *providerpkg.CertificateResolution
+	err                          error
+	resolveFunc                  func(ctx context.Context, domain string, current *providerpkg.ObservedCertificate, options providerpkg.ResolveOptions) (*providerpkg.CertificateResolution, error)
+	cleanupFunc                  func(ctx context.Context, domain string, keep *providerpkg.CertificateMaterial, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error
+	cleanupUnusedFunc            func(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) error
+	cleanupExpiredFunc           func(ctx context.Context) error
+	listUnusedCandidatesFunc     func(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) ([]providerpkg.CleanupCandidate, error)
+	listExpiredCandidatesFunc    func(ctx context.Context) ([]providerpkg.CleanupCandidate, error)
+	deleteCleanupCandidatesFunc  func(ctx context.Context, candidates []providerpkg.CleanupCandidate) error
 }
 
 func (p *fakeUpdaterProvider) ResolveCertificate(ctx context.Context, domain string, current *providerpkg.ObservedCertificate, options providerpkg.ResolveOptions) (*providerpkg.CertificateResolution, error) {
@@ -131,6 +138,46 @@ func (p *fakeUpdaterProvider) CleanupExpiredCertificates(ctx context.Context) er
 
 	if cleanupExpiredFunc != nil {
 		return cleanupExpiredFunc(ctx)
+	}
+	return nil
+}
+
+func (p *fakeUpdaterProvider) ListUnusedOldCertificateCleanupCandidates(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) ([]providerpkg.CleanupCandidate, error) {
+	p.mu.Lock()
+	p.listUnusedCandidatesCalls++
+	p.lastCleanupDomain = domain
+	p.lastCleanupLive = live
+	p.lastCleanupOptions = options
+	listUnusedCandidatesFunc := p.listUnusedCandidatesFunc
+	p.mu.Unlock()
+
+	if listUnusedCandidatesFunc != nil {
+		return listUnusedCandidatesFunc(ctx, domain, live, options)
+	}
+	return nil, nil
+}
+
+func (p *fakeUpdaterProvider) ListExpiredCertificateCleanupCandidates(ctx context.Context) ([]providerpkg.CleanupCandidate, error) {
+	p.mu.Lock()
+	p.listExpiredCandidatesCalls++
+	listExpiredCandidatesFunc := p.listExpiredCandidatesFunc
+	p.mu.Unlock()
+
+	if listExpiredCandidatesFunc != nil {
+		return listExpiredCandidatesFunc(ctx)
+	}
+	return nil, nil
+}
+
+func (p *fakeUpdaterProvider) DeleteCleanupCandidates(ctx context.Context, candidates []providerpkg.CleanupCandidate) error {
+	p.mu.Lock()
+	p.deleteCleanupCandidatesCalls++
+	p.lastCleanupCandidates = append([]providerpkg.CleanupCandidate(nil), candidates...)
+	deleteCleanupCandidatesFunc := p.deleteCleanupCandidatesFunc
+	p.mu.Unlock()
+
+	if deleteCleanupCandidatesFunc != nil {
+		return deleteCleanupCandidatesFunc(ctx, candidates)
 	}
 	return nil
 }
@@ -606,5 +653,143 @@ func TestUpdaterCleanupExpiredCertificates(t *testing.T) {
 	}
 	if provider.cleanupExpiredCalls != 1 {
 		t.Fatalf("cleanupExpiredCalls = %d, want 1", provider.cleanupExpiredCalls)
+	}
+}
+
+func TestUpdaterBuildCleanupPlanConfiguredOld(t *testing.T) {
+	provider := &fakeUpdaterProvider{
+		listUnusedCandidatesFunc: func(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) ([]providerpkg.CleanupCandidate, error) {
+			return []providerpkg.CleanupCandidate{{
+				CleanupType:   providerpkg.CleanupTypeConfiguredOld,
+				Domain:        domain,
+				CertificateID: "old-" + domain,
+				NotAfter:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+			}}, nil
+		},
+	}
+	updater := &Updater{
+		cfg: &Config{
+			Domains: []DomainConfig{
+				{Domain: "doc.example.com", EffectiveProvider: ProviderTencentCloud},
+				{Domain: "api.example.com", EffectiveProvider: ProviderTencentCloud},
+			},
+		},
+		providers: map[string]providerpkg.Provider{ProviderTencentCloud: provider},
+		ctx:       context.Background(),
+		probeCertificate: func(ctx context.Context, domain string) (*ObservedCertificate, error) {
+			return &ObservedCertificate{
+				Domain:      domain,
+				Fingerprint: "live-" + domain,
+				NotAfter:    time.Now().Add(24 * time.Hour),
+			}, nil
+		},
+	}
+
+	candidates, err := updater.BuildCleanupPlan(true, false)
+	if err != nil {
+		t.Fatalf("BuildCleanupPlan() error = %v", err)
+	}
+	if provider.listUnusedCandidatesCalls != 2 {
+		t.Fatalf("listUnusedCandidatesCalls = %d, want 2", provider.listUnusedCandidatesCalls)
+	}
+	if len(provider.lastCleanupOptions.ManagedDomains) != 2 {
+		t.Fatalf("ManagedDomains = %#v, want 2 entries", provider.lastCleanupOptions.ManagedDomains)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("candidates = %#v, want 2", candidates)
+	}
+	for _, candidate := range candidates {
+		if candidate.Provider != ProviderTencentCloud {
+			t.Fatalf("candidate.Provider = %q, want %q", candidate.Provider, ProviderTencentCloud)
+		}
+	}
+}
+
+func TestUpdaterBuildCleanupPlanExpired(t *testing.T) {
+	provider := &fakeUpdaterProvider{
+		listExpiredCandidatesFunc: func(ctx context.Context) ([]providerpkg.CleanupCandidate, error) {
+			return []providerpkg.CleanupCandidate{{
+				CleanupType:   providerpkg.CleanupTypeAllExpired,
+				Domain:        "doc.example.com",
+				CertificateID: "expired-cert",
+			}}, nil
+		},
+	}
+	updater := &Updater{
+		providers: map[string]providerpkg.Provider{ProviderTencentCloud: provider},
+		ctx:       context.Background(),
+	}
+
+	candidates, err := updater.BuildCleanupPlan(false, true)
+	if err != nil {
+		t.Fatalf("BuildCleanupPlan() error = %v", err)
+	}
+	if provider.listExpiredCandidatesCalls != 1 {
+		t.Fatalf("listExpiredCandidatesCalls = %d, want 1", provider.listExpiredCandidatesCalls)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, want 1", candidates)
+	}
+	if candidates[0].Provider != ProviderTencentCloud || candidates[0].CertificateID != "expired-cert" {
+		t.Fatalf("candidate = %#v, want provider-filled expired-cert", candidates[0])
+	}
+}
+
+func TestUpdaterBuildCleanupPlanDeduplicatesCandidates(t *testing.T) {
+	currentExpiresAt := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	provider := &fakeUpdaterProvider{
+		listUnusedCandidatesFunc: func(ctx context.Context, domain string, live *providerpkg.ObservedCertificate, options providerpkg.CleanupOptions) ([]providerpkg.CleanupCandidate, error) {
+			return []providerpkg.CleanupCandidate{{
+				Provider:           ProviderTencentCloud,
+				CleanupType:        providerpkg.CleanupTypeConfiguredOld,
+				Domain:             domain,
+				CertificateID:      "same-cert",
+				CertificateDomains: []string{domain},
+				CurrentNotAfter:    live.NotAfter,
+			}}, nil
+		},
+		listExpiredCandidatesFunc: func(ctx context.Context) ([]providerpkg.CleanupCandidate, error) {
+			return []providerpkg.CleanupCandidate{{
+				Provider:           ProviderTencentCloud,
+				CleanupType:        providerpkg.CleanupTypeAllExpired,
+				Domain:             "doc.example.com",
+				CertificateID:      "same-cert",
+				CertificateDomains: []string{"alt.example.com"},
+			}}, nil
+		},
+	}
+	updater := &Updater{
+		cfg: &Config{
+			Domains: []DomainConfig{
+				{Domain: "doc.example.com", EffectiveProvider: ProviderTencentCloud},
+			},
+		},
+		providers: map[string]providerpkg.Provider{ProviderTencentCloud: provider},
+		ctx:       context.Background(),
+		probeCertificate: func(ctx context.Context, domain string) (*ObservedCertificate, error) {
+			return &ObservedCertificate{
+				Domain:      domain,
+				Fingerprint: "live-" + domain,
+				NotAfter:    currentExpiresAt,
+			}, nil
+		},
+	}
+
+	candidates, err := updater.BuildCleanupPlan(true, true)
+	if err != nil {
+		t.Fatalf("BuildCleanupPlan() error = %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, want 1 deduplicated candidate", candidates)
+	}
+	candidate := candidates[0]
+	if candidate.CleanupType != "configured-old,all-expired" {
+		t.Fatalf("CleanupType = %q, want configured-old,all-expired", candidate.CleanupType)
+	}
+	if len(candidate.CertificateDomains) != 2 || candidate.CertificateDomains[0] != "alt.example.com" || candidate.CertificateDomains[1] != "doc.example.com" {
+		t.Fatalf("CertificateDomains = %#v, want merged sorted domains", candidate.CertificateDomains)
+	}
+	if !candidate.CurrentNotAfter.Equal(currentExpiresAt) {
+		t.Fatalf("CurrentNotAfter = %s, want %s", candidate.CurrentNotAfter, currentExpiresAt)
 	}
 }
