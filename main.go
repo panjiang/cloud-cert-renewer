@@ -11,12 +11,12 @@ import (
 )
 
 var configFilePath string
-var forceUpdate bool
+var onceMode bool
 var showVersion bool
 
 func init() {
 	flag.StringVar(&configFilePath, "config", "config.yaml", "Config file path")
-	flag.BoolVar(&forceUpdate, "force", false, "Force one certificate check round and exit")
+	flag.BoolVar(&onceMode, "once", false, "Run one normal check/update round and exit")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 }
 
@@ -46,7 +46,7 @@ func run() int {
 
 	zap.L().Info("starting cert-renewer",
 		zap.String("config", configFilePath),
-		zap.Bool("force", forceUpdate))
+		zap.Bool("once", onceMode))
 
 	cfg, err := LoadConfig(configFilePath)
 	if err != nil {
@@ -74,18 +74,18 @@ func run() int {
 		zap.Duration("beforeExpired", cfg.Alert.BeforeExpired),
 		zap.Duration("checkInterval", cfg.Alert.CheckInterval),
 		zap.String("logLevel", cfg.Log.Level),
-		zap.Bool("force", forceUpdate))
+		zap.Bool("once", onceMode))
 
-	return executeRun(updater, forceUpdate)
+	return executeRun(updater, onceMode)
 }
 
-func executeRun(updater updaterRunner, force bool) int {
-	if !force {
+func executeRun(updater updaterRunner, once bool) int {
+	if !once {
 		updater.Run()
 		return 0
 	}
 
-	result := updater.RunOnce(CheckOptions{Force: true})
+	result := updater.RunOnce(CheckOptions{})
 	if result.Failures > 0 {
 		return 1
 	}

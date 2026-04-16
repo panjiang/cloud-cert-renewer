@@ -1,22 +1,67 @@
 # cert-renewer
 
-Update Tencent Cloud SSL certificates directly on the certificate host.
+A small daemon/CLI that keeps Tencent Cloud SSL certificates in sync on the certificate host.
 
-Run this program on the machine that already serves the certificates.
+Run it on the machine that already serves the certificates.
 
-For each configured domain, it:
+Supported features:
 
-- checks the current public TLS certificate
-- downloads a newer Tencent Cloud certificate when the domain enters the `beforeExpired` window
-- replaces local certificate files atomically
-- runs domain-level `postCommands`
-- runs `globalPostCommands` for that updated domain
-- verifies the external certificate after `globalPostCommands`
-- optionally starts asynchronous cleanup of older Tencent Cloud certificates after verification succeeds
+- Checks the current public TLS certificate for each configured domain
+- Downloads a newer Tencent Cloud certificate when the domain enters the `beforeExpired` window
+- Optionally auto-applies a new Tencent Cloud DV certificate when no deployable certificate is available
+- Replaces local certificate files atomically
+- Runs domain-level `postCommands`
+- Runs `globalPostCommands` for each domain that reaches the deployment stage
+- Verifies the external certificate after `globalPostCommands`
+- Optionally starts asynchronous cleanup of older Tencent Cloud certificates after verification succeeds
 
-Use `-force` to run one validation round for a fresh installation or troubleshooting.
+## Install
 
-## Config
+Install the latest Linux release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo sh
+```
+
+Optional: install a specific version instead of the latest release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
+  sudo env VERSION=v0.1.0 sh
+```
+
+## Install (Optional: China Proxy)
+
+If direct access to GitHub is slow or blocked, use a mirrored script URL, set `GITHUB_PROXY`, and install an explicit release tag.
+
+Use a specific version instead of relying on the default `latest` resolution.
+
+Install or upgrade through `ghproxy.net`:
+
+```sh
+curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
+  sudo env GITHUB_PROXY=https://ghproxy.net VERSION=<release-tag> sh
+```
+
+## Configure
+
+If you want to start from the installed example file and `/etc/cert-renewer/config.yaml` does not already exist:
+
+```sh
+sudo cp -n /etc/cert-renewer/config.yaml.example /etc/cert-renewer/config.yaml
+```
+
+This avoids overwriting an existing runtime configuration.
+
+Edit the runtime config:
+
+The installer creates this file with `0600` permissions if it does not already exist.
+
+```sh
+sudo vi /etc/cert-renewer/config.yaml
+```
+
+Example configuration:
 
 ```yaml
 alert:
@@ -40,7 +85,8 @@ providerConfigs:
     secretId: xxx
     # Required.
     secretKey: xxx
-    # Optional. Example enables it, but omitted means false at runtime.
+    # Optional. Delete older Tencent Cloud certificates asynchronously
+    # after the new certificate is externally verified. Default is false.
     autoDeleteOldCertificates: true
     autoApply:
       # Auto-apply a free DV certificate when no deployable certificate exists.
@@ -53,7 +99,7 @@ providerConfigs:
       # Delete the DNS_AUTO validation record after verification.
       deleteDnsAutoRecord: true
 
-# Optional. Run once for each successfully updated domain.
+# Optional. Run once after each domain is deployed locally and before external verification.
 globalPostCommands:
   - nginx -t
   - nginx -s reload
@@ -70,7 +116,7 @@ domains:
       - consul kv put certs/doc.yourdomain.com.key @{{.KeyPath}}
 ```
 
-Config notes:
+Configuration notes:
 
 - Durations use Go-style units plus day and week units: `ms`, `s`, `m`, `h`, `d`, and `w`.
 - Example durations: `12h`, `10d`, `1w`.
@@ -80,58 +126,21 @@ Config notes:
 - `providerConfigs.tencentcloud.autoDeleteOldCertificates` defaults to `false` when omitted.
 - Old certificate cleanup only runs after the new certificate is externally verified, and it skips any certificate that still appears to be live or shared with another managed domain.
 
-## Run
+## Validate (Optional)
+
+Run one normal round before starting the service:
 
 ```sh
-go run . -config=config.yaml
+sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -once
 ```
 
-Run one forced update check round and exit:
+This is not a dry-run. It may download or apply certificates, replace local files, run `postCommands`, run `globalPostCommands`, verify the external certificate, and trigger old certificate cleanup.
 
-```sh
-go run . -config=config.yaml -force
-```
+Use it to validate the configuration and operational flow before enabling the service.
 
-`-force` skips the `beforeExpired` window and exits after one round.
-
-When `autoDeleteOldCertificates` is enabled, `-force` also runs one cleanup pass after a domain verifies successfully.
-
-Use it for installation validation or troubleshooting.
-
-Do not add `-force` to the systemd service command.
-Do not run it in parallel with the running service instance.
-
-## Install
-
-Install the latest Linux release:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | sudo sh
-```
-
-Optional: install a specific version instead of the latest release:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
-  sudo env VERSION=v0.1.0 sh
-```
-
-Edit the runtime config:
-
-The installer creates this file with `0600` permissions if it does not already exist.
-
-```sh
-sudo vi /etc/cert-renewer/config.yaml
-```
-
-Optional: validate the configuration with one forced update check before starting the service:
-
-```sh
-sudo /usr/local/bin/cert-renewer -config=/etc/cert-renewer/config.yaml -force
-```
-
-This command runs the forced update path.
 Make sure the `cert-renewer` service is not already running when you execute it.
+
+## Daemon
 
 Start the service after the config is ready:
 
@@ -144,19 +153,6 @@ View service logs:
 
 ```sh
 sudo journalctl -u cert-renewer -f
-```
-
-## China Proxy
-
-If direct access to GitHub is slow or blocked, use a mirrored script URL, set `GITHUB_PROXY`, and install an explicit release tag.
-
-Use a specific version instead of relying on the default `latest` resolution.
-
-Install or upgrade through `ghproxy.net`:
-
-```sh
-curl -fsSL https://ghproxy.net/https://raw.githubusercontent.com/panjiang/cert-renewer/main/scripts/install.sh | \
-  sudo env GITHUB_PROXY=https://ghproxy.net VERSION=<release-tag> sh
 ```
 
 ## Upgrade

@@ -123,6 +123,8 @@ providerConfigs:
   tencentcloud:
     secretId: xxx
     secretKey: xxx
+    # Optional. Delete older Tencent Cloud certificates asynchronously
+    # after the new certificate is externally verified. Default is false.
     autoDeleteOldCertificates: true
     autoApply:
       enabled: true
@@ -182,9 +184,9 @@ echo "Configuration example: ${CONFIG_DIR}/config.yaml.example"
 echo "Runtime config: ${CONFIG_DIR}/config.yaml"
 echo "Edit config before starting:"
 echo "  sudo vi ${CONFIG_DIR}/config.yaml"
-echo "Validate config with one forced update check before starting the service:"
-echo "  sudo ${INSTALL_DIR}/${BINARY_NAME} -config=${CONFIG_DIR}/config.yaml -force"
-echo "  Note: -force runs the forced update path. Do not run it while the service is already running."
+echo "Validate config with one normal check/update round before starting the service:"
+echo "  sudo ${INSTALL_DIR}/${BINARY_NAME} -config=${CONFIG_DIR}/config.yaml -once"
+echo "  Note: -once runs one normal round and exits. Do not run it while the service is already running."
 echo "Start the service after the config is ready:"
 echo "  sudo systemctl enable --now ${SERVICE_NAME}"
 echo "  sudo systemctl status ${SERVICE_NAME}"

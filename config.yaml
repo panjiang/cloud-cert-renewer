@@ -12,6 +12,8 @@ providerConfigs:
   tencentcloud:
     secretId: xxx
     secretKey: xxx
+    # Optional. Delete older Tencent Cloud certificates asynchronously
+    # after the new certificate is externally verified. Default is false.
     autoDeleteOldCertificates: true
     autoApply:
       enabled: true

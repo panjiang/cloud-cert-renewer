@@ -38,7 +38,7 @@ func TestExecuteRunDefaultMode(t *testing.T) {
 	}
 }
 
-func TestExecuteRunForceModeSuccess(t *testing.T) {
+func TestExecuteRunOnceModeSuccess(t *testing.T) {
 	updater := &fakeUpdaterRunner{
 		result: CheckResult{},
 	}
@@ -53,12 +53,12 @@ func TestExecuteRunForceModeSuccess(t *testing.T) {
 	if updater.runOnceCalls != 1 {
 		t.Fatalf("runOnceCalls = %d, want 1", updater.runOnceCalls)
 	}
-	if !updater.lastOptions.Force {
-		t.Fatal("CheckOptions.Force = false, want true")
+	if updater.lastOptions.Force {
+		t.Fatal("CheckOptions.Force = true, want false")
 	}
 }
 
-func TestExecuteRunForceModeFailure(t *testing.T) {
+func TestExecuteRunOnceModeFailure(t *testing.T) {
 	updater := &fakeUpdaterRunner{
 		result: CheckResult{Failures: 1},
 	}
